@@ -1,0 +1,15 @@
+[package]
+name = "forma-layout"
+description = "Платформа Forma: составной интерфейс в духе Blender — области, вкладки, отдельные окна"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+egui.workspace = true
+serde.workspace = true
+log.workspace = true
+forma-i18n.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

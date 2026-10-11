@@ -1,0 +1,15 @@
+[package]
+name = "forma-ui"
+description = "Платформа Forma: тема, шрифты, виджеты и окна платформы (настройки, раскладка клавиш)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+egui.workspace = true
+serde.workspace = true
+log.workspace = true
+forma-i18n.workspace = true
+forma-layout.workspace = true
+forma-actions.workspace = true
+forma-settings.workspace = true

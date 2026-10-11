@@ -1,0 +1,13 @@
+[package]
+name = "forma-settings"
+description = "Платформа Forma: настройки по компонентам, их хранение, экспорт и импорт"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+dirs.workspace = true
+zip = { version = "9.0.1", default-features = false, features = ["deflate"] }
