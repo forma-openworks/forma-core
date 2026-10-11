@@ -2,7 +2,7 @@
 //! записывается нажатием, занятые сочетания показываются сразу, изменённые действия
 //! выделены акцентом и возвращаются к стандартным одной кнопкой.
 
-use egui::{Align, Align2, CornerRadius, CursorIcon, Event, FontId, Key, Layout, Margin, Rect, RichText, Sense, Stroke, TextEdit, Ui, pos2, vec2};
+use egui::{Align2, CornerRadius, CursorIcon, Event, FontId, Id, Key, Margin, Rect, RichText, Sense, Stroke, TextEdit, Ui, pos2, vec2};
 use forma_actions::{Action, Keymap, Registry, Shortcut, Title};
 use forma_i18n::t;
 
@@ -48,16 +48,21 @@ impl KeymapPage {
                 self.capture = None;
             }
         }
-        ui.horizontal(|ui| {
-            ui.add(TextEdit::singleline(&mut self.filter).hint_text(format!("🔍 {}", t!("keymap-search-hint"))).desired_width(300.0).margin(Margin::symmetric(8, 5)));
-            if !keymap.overrides.is_empty() {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button(t!("keymap-reset-all")).clicked() {
-                        keymap.overrides.clear();
-                    }
-                });
-            }
-        });
+        let filter = &mut self.filter;
+        crate::widgets::bar(
+            ui,
+            Id::new("forma-keymap-bar"),
+            0.0,
+            |ui| {
+                let width = ui.available_width().min(300.0);
+                ui.add(TextEdit::singleline(filter).id(Id::new("forma-keymap-filter")).hint_text(format!("🔍 {}", t!("keymap-search-hint"))).desired_width(width).margin(Margin::symmetric(8, 5)));
+            },
+            |ui| {
+                if !keymap.overrides.is_empty() && ui.button(t!("keymap-reset-all")).clicked() {
+                    keymap.overrides.clear();
+                }
+            },
+        );
         ui.add_space(8.0);
         let page_title = t!("settings-page-keymap");
         let filter = if !self.filter.trim().is_empty() {
@@ -93,14 +98,24 @@ impl KeymapPage {
     fn action_row(&mut self, ui: &mut Ui, pal: &Palette, registry: &Registry, keymap: &mut Keymap, a: &Action, filter: &str) {
         let modified = keymap.is_modified(&a.id);
         let keys: Vec<Shortcut> = keymap.shortcuts(registry, &a.id).to_vec();
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
-        if resp.hovered() {
-            ui.painter().rect_filled(rect, CornerRadius::same(6), pal.bg_hover);
-        }
         let name = title(a);
         let color = if modified { pal.accent } else { pal.text };
-        let galley = ui.painter().layout_no_wrap(name.clone(), FontId::proportional(13.5), color);
-        let text_pos = pos2(rect.left() + 10.0, rect.center().y - galley.size().y / 2.0);
+        // Сколько места справа займут кнопки и сочетания. Если вместе с названием они
+        // не помещаются в строку, сочетания уходят на вторую строку под названием.
+        let key_galleys: Vec<_> = keys.iter().map(|k| ui.painter().layout_no_wrap(k.to_string(), FontId::monospace(12.0), pal.text)).collect();
+        let none = ui.painter().layout_no_wrap(t!("keymap-none"), FontId::proportional(12.0), pal.text_faint);
+        let right_w = 8.0 + if modified { 52.0 } else { 26.0 } + if keys.is_empty() { none.size().x + 4.0 } else { key_galleys.iter().map(|g| g.size().x + 32.0).sum() };
+        let name_w = ui.painter().layout_no_wrap(name.clone(), FontId::proportional(13.5), color).size().x;
+        let width = ui.available_width();
+        let two_lines = 10.0 + name_w + 16.0 + right_w > width;
+        let (rect, resp) = ui.allocate_exact_size(vec2(width, if two_lines { 56.0 } else { 30.0 }), Sense::hover());
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, CornerRadius::same(6), pal.list_hover);
+        }
+        let (name_y, keys_y) = if two_lines { (rect.top() + 15.0, rect.bottom() - 15.0) } else { (rect.center().y, rect.center().y) };
+        let name_room = if two_lines { width - 20.0 } else { width - 26.0 - right_w };
+        let galley = crate::widgets::elide(ui, name.clone(), FontId::proportional(13.5), color, name_room);
+        let text_pos = pos2(rect.left() + 10.0, name_y - galley.size().y / 2.0);
         if !filter.trim().is_empty() && matches(&name, filter) {
             ui.painter().rect_filled(Rect::from_min_size(text_pos, galley.size()).expand2(vec2(3.0, 1.0)), CornerRadius::same(4), sw::highlight(pal));
         }
@@ -109,7 +124,7 @@ impl KeymapPage {
         // Справа налево: «↺», «+», сочетания.
         let mut x = rect.right() - 8.0;
         let button = |ui: &mut Ui, x: &mut f32, glyph: &str, hint: String| {
-            let r = Rect::from_center_size(pos2(*x - 11.0, rect.center().y), vec2(22.0, 22.0));
+            let r = Rect::from_center_size(pos2(*x - 11.0, keys_y), vec2(22.0, 22.0));
             *x -= 26.0;
             let b = ui.interact(r, ui.id().with((&a.id, glyph)), Sense::click());
             if b.hovered() {
@@ -125,17 +140,15 @@ impl KeymapPage {
             self.capture = Some(Capture { action: a.id.clone(), key: None });
         }
         if keys.is_empty() {
-            let g = ui.painter().layout_no_wrap(t!("keymap-none"), FontId::proportional(12.0), pal.text_faint);
-            ui.painter().galley(pos2(x - g.size().x - 4.0, rect.center().y - g.size().y / 2.0), g, pal.text_faint);
+            ui.painter().galley(pos2(x - none.size().x - 4.0, keys_y - none.size().y / 2.0), none, pal.text_faint);
         }
-        for key in keys.iter().rev() {
+        for (key, g) in keys.iter().zip(key_galleys).rev() {
             let text = key.to_string();
-            let g = ui.painter().layout_no_wrap(text.clone(), FontId::monospace(12.0), pal.text);
-            let chip = Rect::from_min_max(pos2(x - g.size().x - 30.0, rect.center().y - 11.0), pos2(x - 4.0, rect.center().y + 11.0));
+            let chip = Rect::from_min_max(pos2(x - g.size().x - 30.0, keys_y - 11.0), pos2(x - 4.0, keys_y + 11.0));
             x = chip.left() - 2.0;
             let c = ui.interact(chip, ui.id().with((&a.id, &text)), Sense::click());
             let hit = !filter.trim().is_empty() && matches(&text, filter);
-            ui.painter().rect(chip, CornerRadius::same(6), if hit { sw::highlight(pal) } else { pal.bg_elevated }, Stroke::new(1.0, pal.border), egui::StrokeKind::Inside);
+            ui.painter().rect(chip, CornerRadius::same(6), if hit { sw::highlight(pal) } else { pal.chip_bg }, Stroke::new(1.0, pal.chip_border), egui::StrokeKind::Inside);
             ui.painter().galley(pos2(chip.left() + 8.0, chip.center().y - g.size().y / 2.0), g, pal.text);
             let cross = if c.hovered() { pal.danger } else { pal.text_faint };
             ui.painter().text(pos2(chip.right() - 10.0, chip.center().y), Align2::CENTER_CENTER, "×", FontId::proportional(13.0), cross);
@@ -154,17 +167,23 @@ impl KeymapPage {
         let Some(cap) = &mut self.capture else { return };
         let mut cancel = false;
         let mut add: Option<bool> = None;
-        egui::Frame::new().fill(pal.bg_elevated).stroke(Stroke::new(1.0, pal.accent)).corner_radius(CornerRadius::same(8)).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                match cap.key {
-                    Some(k) => ui.label(RichText::new(k.to_string()).font(FontId::monospace(13.5)).color(pal.heading)),
-                    None => ui.label(RichText::new(t!("keymap-press")).color(pal.text_muted)),
-                };
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        egui::Frame::new().fill(pal.popup_bg).stroke(Stroke::new(1.0, pal.input_focus)).corner_radius(CornerRadius::same(8)).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
+            let key = cap.key;
+            crate::widgets::bar(
+                ui,
+                Id::new("forma-keymap-capture"),
+                0.0,
+                |ui| {
+                    match key {
+                        Some(k) => ui.label(RichText::new(k.to_string()).font(FontId::monospace(13.5)).color(pal.heading)),
+                        None => ui.label(RichText::new(t!("keymap-press")).color(pal.text_muted)),
+                    };
+                },
+                |ui| {
                     if ui.button(t!("settings-cancel")).clicked() {
                         cancel = true;
                     }
-                    if let Some(k) = cap.key {
+                    if let Some(k) = key {
                         let others = keymap.conflicts(registry, k, id);
                         if !others.is_empty() && ui.button(t!("keymap-conflict-remove")).clicked() {
                             add = Some(true);
@@ -173,8 +192,8 @@ impl KeymapPage {
                             add = Some(false);
                         }
                     }
-                });
-            });
+                },
+            );
             if let Some(k) = cap.key {
                 let others = keymap.conflicts(registry, k, id);
                 if !others.is_empty() {

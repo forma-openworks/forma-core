@@ -1,14 +1,14 @@
 //! Внешний вид — компонент настроек платформы и его страница: язык, тема, акцент,
-//! размер текста, масштаб.
+//! масштаб, фоновая картинка.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use egui::{CursorIcon, Sense, Stroke, Ui, vec2};
+use egui::{CursorIcon, RichText, Sense, Stroke, Ui, vec2};
 use forma_i18n::t;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::settings_window::{self as sw, row};
-use crate::theme::{Accent, Palette, ThemeKind};
+use crate::theme::{Accent, Fit, Palette};
 use crate::widgets;
 
 pub const PAGE: &str = "appearance";
@@ -18,18 +18,45 @@ pub const PAGE: &str = "appearance";
 pub struct Appearance {
     /// Язык интерфейса; `None` — как в системе.
     pub language: Option<String>,
-    pub theme: ThemeKind,
-    pub accent: Accent,
-    /// Размер текста интерфейса в пикселях.
-    pub font_size: f32,
+    /// id темы; пусто — тема программы по умолчанию.
+    #[serde(deserialize_with = "theme_id")]
+    pub theme: String,
+    /// Свой акцент поверх темы; `None` — акцент темы.
+    pub accent: Option<Accent>,
     /// Масштаб всего интерфейса.
     pub zoom: f32,
+    /// Своя фоновая картинка поверх картинки темы.
+    pub background: Option<PathBuf>,
+    pub background_opacity: f32,
+    pub background_fit: Fit,
+    /// Размер текста из первых версий: переезжает в компонент «Шрифты».
+    #[serde(rename = "font_size", skip_serializing)]
+    pub legacy_font_size: Option<f32>,
 }
 
 impl Default for Appearance {
     fn default() -> Self {
-        Self { language: None, theme: ThemeKind::Dark, accent: Accent::Violet, font_size: 16.0, zoom: 1.0 }
+        Self {
+            language: None,
+            theme: String::new(),
+            accent: None,
+            zoom: 1.0,
+            background: None,
+            background_opacity: 0.12,
+            background_fit: Fit::Cover,
+            legacy_font_size: None,
+        }
     }
+}
+
+/// id темы. Первые версии хранили «Dark» и «Light» — это встроенные темы Mycelium.
+fn theme_id<'de, D: Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let s = String::deserialize(d)?;
+    Ok(match s.as_str() {
+        "Dark" => "mycelium-dark".to_owned(),
+        "Light" => "mycelium-light".to_owned(),
+        _ => s,
+    })
 }
 
 impl forma_settings::Component for Appearance {
@@ -45,63 +72,73 @@ impl Appearance {
 
 pub const ZOOM_RANGE: std::ops::RangeInclusive<f32> = 0.5..=3.0;
 
-/// Подписи настроек страницы — для поиска.
-pub fn keywords() -> Vec<String> {
-    vec![t!("settings-language"), t!("settings-theme"), t!("settings-accent"), t!("settings-font-size"), t!("settings-zoom")]
+/// Тема в списке выбора.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThemeOption {
+    pub id: String,
+    pub name: String,
 }
 
-/// Страница «Внешний вид». `locales_dir` — где лежат пользовательские переводы.
-pub fn page(ui: &mut Ui, pal: &Palette, search: &str, a: &mut Appearance, locales_dir: Option<&Path>) {
+/// Что странице нужно знать о программе.
+pub struct PageContext<'a> {
+    /// Папка своих переводов.
+    pub locales_dir: Option<&'a Path>,
+    /// Папка своих тем.
+    pub themes_dir: Option<&'a Path>,
+    pub themes: &'a [ThemeOption],
+    /// Тема по умолчанию (когда в настройках пусто).
+    pub default_theme: &'a str,
+    /// Ошибки в файле выбранной темы.
+    pub theme_errors: &'a [String],
+}
+
+/// Подписи настроек страницы — для поиска.
+pub fn keywords() -> Vec<String> {
+    vec![t!("settings-language"), t!("settings-theme"), t!("settings-accent"), t!("settings-zoom"), t!("settings-background")]
+}
+
+/// Страница «Внешний вид».
+pub fn page(ui: &mut Ui, pal: &Palette, search: &str, a: &mut Appearance, cx: &PageContext) {
     let d = Appearance::default();
 
     sw::group(ui, pal, &t!("settings-group-language"));
-    let languages = forma_i18n::languages();
-    let mut labels = vec![t!("settings-language-system")];
-    labels.extend(languages.iter().map(|(_, name)| name.clone()));
-    let selected = match &a.language {
-        None => 0,
-        Some(code) => languages.iter().position(|(c, _)| c == code).map_or(0, |i| i + 1),
-    };
+    let mut languages: Vec<(Option<String>, String)> = vec![(None, t!("settings-language-system"))];
+    languages.extend(forma_i18n::languages().into_iter().map(|(code, name)| (Some(code), name)));
     let mut pick = None;
     if row(ui, pal, search, &t!("settings-language"), a.language != d.language, |ui| {
-        ui.allocate_ui(vec2(320.0, 28.0), |ui| {
-            let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-            pick = widgets::segmented(ui, pal, sw::id(PAGE, "language"), &refs, selected, true);
-        });
+        pick = widgets::dropdown(ui, pal, sw::id(PAGE, "language"), 300.0, &a.language, &languages);
     }) {
         a.language = d.language.clone();
     }
-    if let Some(i) = pick {
-        a.language = if i == 0 { None } else { Some(languages[i - 1].0.clone()) };
+    if let Some(l) = pick {
+        a.language = l;
     }
-    if let Some(dir) = locales_dir {
+    if let Some(dir) = cx.locales_dir {
         sw::hint(ui, pal, &t!("settings-locales-hint", path = dir.display().to_string()));
     }
 
     ui.add_space(8.0);
     sw::group(ui, pal, &t!("settings-group-look"));
+    let current = if a.theme.is_empty() { cx.default_theme.to_owned() } else { a.theme.clone() };
+    let themes: Vec<(String, String)> = cx.themes.iter().map(|t| (t.id.clone(), t.name.clone())).collect();
     let mut pick = None;
-    if row(ui, pal, search, &t!("settings-theme"), a.theme != d.theme, |ui| {
-        ui.allocate_ui(vec2(220.0, 28.0), |ui| {
-            let themes = [t!("theme-dark"), t!("theme-light")];
-            let refs: Vec<&str> = themes.iter().map(String::as_str).collect();
-            pick = widgets::segmented(ui, pal, sw::id(PAGE, "theme"), &refs, usize::from(a.theme == ThemeKind::Light), true);
-        });
+    if row(ui, pal, search, &t!("settings-theme"), !a.theme.is_empty() && a.theme != cx.default_theme, |ui| {
+        pick = widgets::dropdown(ui, pal, sw::id(PAGE, "theme"), 300.0, &current, &themes);
     }) {
-        a.theme = d.theme;
+        a.theme = String::new();
     }
-    if let Some(i) = pick {
-        a.theme = if i == 0 { ThemeKind::Dark } else { ThemeKind::Light };
+    if let Some(id) = pick {
+        a.theme = id;
+    }
+    for e in cx.theme_errors.iter().take(5) {
+        sw::hint(ui, pal, &format!("⚠ {e}"));
+    }
+    if let Some(dir) = cx.themes_dir {
+        sw::hint(ui, pal, &t!("settings-themes-hint", path = dir.display().to_string()));
     }
 
-    if row(ui, pal, search, &t!("settings-accent"), a.accent != d.accent, |ui| accent_picker(ui, pal, &mut a.accent)) {
-        a.accent = d.accent;
-    }
-
-    if row(ui, pal, search, &t!("settings-font-size"), a.font_size != d.font_size, |ui| {
-        ui.add(egui::Slider::new(&mut a.font_size, 13.0..=22.0).step_by(0.5).suffix(" px"));
-    }) {
-        a.font_size = d.font_size;
+    if row(ui, pal, search, &t!("settings-accent"), a.accent.is_some(), |ui| accent_picker(ui, pal, &mut a.accent)) {
+        a.accent = None;
     }
 
     if row(ui, pal, search, &t!("settings-zoom"), a.zoom != d.zoom, |ui| {
@@ -112,20 +149,87 @@ pub fn page(ui: &mut Ui, pal: &Palette, search: &str, a: &mut Appearance, locale
     }) {
         a.zoom = d.zoom;
     }
+
+    ui.add_space(8.0);
+    sw::group(ui, pal, &t!("settings-background"));
+    let mut choose = false;
+    if row(ui, pal, search, &t!("settings-background-image"), a.background.is_some(), |ui| {
+        let name = a.background.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| t!("settings-background-from-theme"));
+        ui.label(RichText::new(name).color(pal.text));
+        choose = ui.button(t!("settings-background-choose")).clicked();
+    }) {
+        a.background = None;
+    }
+    if choose {
+        let file = rfd::FileDialog::new().set_title(t!("settings-background-choose")).add_filter("image", &["png", "jpg", "jpeg", "webp", "bmp", "gif"]).pick_file();
+        if file.is_some() {
+            a.background = file;
+        }
+    }
+    if row(ui, pal, search, &t!("settings-background-opacity"), a.background_opacity != d.background_opacity, |ui| {
+        let mut percent = (a.background_opacity * 100.0).round();
+        if ui.add(egui::Slider::new(&mut percent, 0.0..=100.0).step_by(1.0).suffix(" %")).changed() {
+            a.background_opacity = percent / 100.0;
+        }
+    }) {
+        a.background_opacity = d.background_opacity;
+    }
+    let fits: Vec<(Fit, String)> = Fit::ALL.iter().map(|f| (*f, fit_label(*f))).collect();
+    let mut pick = None;
+    if row(ui, pal, search, &t!("settings-background-fit"), a.background_fit != d.background_fit, |ui| {
+        pick = widgets::dropdown(ui, pal, sw::id(PAGE, "fit"), 220.0, &a.background_fit, &fits);
+    }) {
+        a.background_fit = d.background_fit;
+    }
+    if let Some(f) = pick {
+        a.background_fit = f;
+    }
+    sw::hint(ui, pal, &t!("settings-background-hint"));
 }
 
-/// Кружки акцентных цветов.
-pub fn accent_picker(ui: &mut Ui, pal: &Palette, accent: &mut Accent) {
+pub fn fit_label(f: Fit) -> String {
+    match f {
+        Fit::Cover => t!("fit-cover"),
+        Fit::Contain => t!("fit-contain"),
+        Fit::Stretch => t!("fit-stretch"),
+        Fit::Tile => t!("fit-tile"),
+        Fit::Center => t!("fit-center"),
+    }
+}
+
+/// «Из темы» и кружки акцентных цветов.
+pub fn accent_picker(ui: &mut Ui, pal: &Palette, accent: &mut Option<Accent>) {
+    if ui.add(egui::Button::new(t!("settings-accent-theme")).selected(accent.is_none())).clicked() {
+        *accent = None;
+    }
+    ui.add_space(4.0);
     for a in Accent::ALL {
         let (rect, resp) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::click());
         let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
         let c = a.color(pal.dark);
         ui.painter().circle_filled(rect.center(), 8.0 + hover * 1.5, c);
-        if *accent == a {
+        if *accent == Some(a) {
             ui.painter().circle_stroke(rect.center(), 12.0, Stroke::new(2.0, c));
         }
         if resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(a.label()).clicked() {
-            *accent = a;
+            *accent = Some(a);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_files_migrate() {
+        let a: Appearance = serde_json::from_str(r#"{"language":"ru","theme":"Light","accent":"Amber","font_size":16.0,"zoom":1.0}"#).unwrap();
+        assert_eq!(a.theme, "mycelium-light");
+        assert_eq!(a.accent, Some(Accent::Amber));
+        assert_eq!(a.legacy_font_size, Some(16.0));
+        let back = serde_json::to_value(&a).unwrap();
+        assert!(back.get("font_size").is_none(), "старое поле больше не пишется");
+        let fresh: Appearance = serde_json::from_str(r#"{"theme":"vs-dark"}"#).unwrap();
+        assert_eq!((fresh.theme.as_str(), fresh.accent), ("vs-dark", None));
     }
 }

@@ -68,8 +68,9 @@ impl FindAction {
         ui.add_space(8.0);
 
         let mut picked = None;
-        // Высота постоянная: окно не прыгает, пока набираешь запрос.
-        let height = ROW_H * ROWS as f32;
+        // Высота постоянная: окно не прыгает, пока набираешь запрос. В низком окне — меньше строк.
+        let fit = ((ui.ctx().content_rect().height() - 190.0) / ROW_H).floor().clamp(3.0, ROWS as f32);
+        let height = ROW_H * fit;
         egui::ScrollArea::vertical().max_height(height).min_scrolled_height(height).auto_shrink([false, false]).show(ui, |ui| {
             if found.is_empty() {
                 ui.label(RichText::new(t!("settings-nothing-found")).color(pal.text_faint));
@@ -77,18 +78,27 @@ impl FindAction {
             for (n, item) in found.iter().enumerate() {
                 let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_H), Sense::click());
                 if n == self.selected {
-                    ui.painter().rect_filled(rect, CornerRadius::same(6), pal.accent_soft);
+                    ui.painter().rect_filled(rect, CornerRadius::same(6), pal.list_selected);
                     if down || up {
                         resp.scroll_to_me(None);
                     }
                 } else if resp.hovered() {
-                    ui.painter().rect_filled(rect, CornerRadius::same(6), pal.bg_hover);
+                    ui.painter().rect_filled(rect, CornerRadius::same(6), pal.list_hover);
                 }
+                // Сочетание справа, название слева; группа — только если остаётся место.
                 let painter = ui.painter().with_clip_rect(rect);
-                let title = painter.text(pos2(rect.left() + 10.0, rect.center().y), Align2::LEFT_CENTER, &item.title, FontId::proportional(13.5), pal.heading);
-                painter.text(pos2(title.right() + 10.0, rect.center().y), Align2::LEFT_CENTER, &item.group, FontId::proportional(12.0), pal.text_faint);
-                if !item.shortcut.is_empty() {
-                    painter.text(pos2(rect.right() - 10.0, rect.center().y), Align2::RIGHT_CENTER, &item.shortcut, FontId::monospace(12.0), pal.text_muted);
+                let shortcut_w = if item.shortcut.is_empty() {
+                    0.0
+                } else {
+                    painter.text(pos2(rect.right() - 10.0, rect.center().y), Align2::RIGHT_CENTER, &item.shortcut, FontId::monospace(12.0), pal.text_muted).width() + 16.0
+                };
+                let room = rect.width() - 20.0 - shortcut_w;
+                let title = crate::widgets::elide(ui, item.title.clone(), FontId::proportional(13.5), pal.heading, room);
+                let title_w = title.size().x;
+                painter.galley(pos2(rect.left() + 10.0, rect.center().y - title.size().y / 2.0), title, pal.heading);
+                if room - title_w > 60.0 {
+                    let group = crate::widgets::elide(ui, item.group.clone(), FontId::proportional(12.0), pal.text_faint, room - title_w - 10.0);
+                    painter.galley(pos2(rect.left() + 20.0 + title_w, rect.center().y - group.size().y / 2.0), group, pal.text_faint);
                 }
                 if resp.clicked() {
                     picked = Some(item.id.clone());

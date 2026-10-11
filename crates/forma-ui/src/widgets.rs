@@ -1,8 +1,117 @@
-//! Виджеты в фирменном стиле FORMA (перенесены из Forma: Holotype).
+//! Виджеты в фирменном стиле FORMA (перенесены из Forma: Holotype) и помощники,
+//! с которыми интерфейс не ломается в узких областях: обрезка текста многоточием
+//! и панель, которая переносит кнопки на вторую строку.
 
-use egui::{ Color32, CornerRadius, CursorIcon, FontId, Id, Rect, Sense, Stroke, Ui, pos2, vec2};
+use std::sync::Arc;
+
+use egui::text::{LayoutJob, TextWrapping};
+use egui::{Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Galley, Id, Layout, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 
 use crate::theme::{self, Palette};
+
+/// Текст в одну строку не шире `max_width`: не поместившийся хвост заменяется на «…».
+pub fn elide(ui: &Ui, text: impl Into<String>, font: FontId, color: Color32, max_width: f32) -> Arc<Galley> {
+    let mut job = LayoutJob::simple_singleline(text.into(), font, color);
+    job.wrap = TextWrapping::truncate_at_width(max_width.max(0.0));
+    ui.painter().layout_job(job)
+}
+
+/// Как [`elide`], но обрезается начало: у пути важнее конец («… › item › Item.java»).
+pub fn elide_start(ui: &Ui, text: &str, font: FontId, color: Color32, max_width: f32) -> Arc<Galley> {
+    let full = ui.painter().layout_no_wrap(text.to_owned(), font.clone(), color);
+    if full.size().x <= max_width {
+        return full;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    // Сколько символов убрать спереди: ищем наименьшее подходящее число делением пополам.
+    let fits = |skip: usize| {
+        let tail: String = std::iter::once('…').chain(chars[skip..].iter().copied()).collect();
+        let g = ui.painter().layout_no_wrap(tail, font.clone(), color);
+        (g.size().x <= max_width).then_some(g)
+    };
+    let (mut lo, mut hi) = (1, chars.len());
+    let mut best = None;
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+        match fits(mid) {
+            Some(g) => {
+                best = Some(g);
+                hi = mid - 1;
+            }
+            None => lo = mid + 1,
+        }
+    }
+    best.unwrap_or_else(|| elide(ui, text, font, color, max_width))
+}
+
+/// Ширина обычной кнопки с текстом `text` (с учётом наименьшей ширины `min`).
+pub fn button_width(ui: &Ui, text: &str, min: f32) -> f32 {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let g = ui.painter().layout_no_wrap(text.to_owned(), font, Color32::WHITE);
+    (g.size().x + ui.spacing().button_padding.x * 2.0).max(min)
+}
+
+/// Ширины групп панели с прошлого кадра и высота строки.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct BarMemory {
+    left: f32,
+    right: f32,
+    height: f32,
+}
+
+/// Строка панели инструментов: группа `left` прижата влево, группа `right` — вправо
+/// (её элементы добавляются справа налево, как в `Layout::right_to_left`).
+///
+/// Если группы не помещаются рядом, правая уходит на вторую строку, а группа, которой
+/// мало и целой строки, переносится по элементам. Ширины групп берутся с прошлого кадра;
+/// когда раскладка меняется, кадр пересчитывается заново, поэтому наложения не видно.
+/// `pad` — отступ слева и справа у каждой строки.
+pub fn bar(ui: &mut Ui, id: Id, pad: f32, left: impl FnOnce(&mut Ui), right: impl FnOnce(&mut Ui)) {
+    const GAP: f32 = 12.0;
+    let avail = ui.available_width() - pad * 2.0;
+    let known: Option<BarMemory> = ui.data(|d| d.get_temp(id));
+    let mem = known.unwrap_or_default();
+    let row_h = if mem.height > 0.0 { mem.height } else { ui.spacing().interact_size.y };
+    let one_row = mem.left + mem.right + GAP <= avail;
+    let mut now = mem;
+    let top = ui.cursor().min + vec2(pad, 0.0);
+    // У групп постоянные id: при смене раскладки поля ввода не теряют фокус.
+    let group = |ui: &mut Ui, salt: &str, min: egui::Pos2, layout: Layout, add: Box<dyn FnOnce(&mut Ui) + '_>| {
+        let rect = Rect::from_min_size(min, vec2(avail, row_h));
+        let mut child = ui.new_child(UiBuilder::new().id(id.with(salt)).max_rect(rect).layout(layout));
+        add(&mut child);
+        child.min_rect()
+    };
+    if one_row {
+        let l = group(ui, "left", top, Layout::left_to_right(Align::Center), Box::new(left));
+        let r = group(ui, "right", top, Layout::right_to_left(Align::Center), Box::new(right));
+        now.left = l.width();
+        now.right = r.width();
+        now.height = l.height().max(r.height());
+        ui.advance_cursor_after_rect(l.union(r));
+    } else {
+        let wrap_left = mem.left > avail;
+        let l = group(ui, "left", top, Layout::left_to_right(Align::Center).with_main_wrap(wrap_left), Box::new(left));
+        ui.advance_cursor_after_rect(l);
+        let wrap_right = mem.right > avail;
+        let r = group(ui, "right", ui.cursor().min + vec2(pad, 0.0), Layout::right_to_left(Align::Center).with_main_wrap(wrap_right), Box::new(right));
+        ui.advance_cursor_after_rect(r);
+        // Перенесённая группа своей настоящей ширины не показывает — помним прежнюю.
+        if !wrap_left {
+            now.left = l.width();
+        }
+        if !wrap_right {
+            now.right = r.width();
+        }
+        now.height = if wrap_left || wrap_right { mem.height } else { l.height().max(r.height()) };
+    }
+    if known != Some(now) {
+        ui.data_mut(|d| d.insert_temp(id, now));
+    }
+    if (now.left + now.right + GAP <= avail) != one_row {
+        ui.ctx().request_discard("forma toolbar layout");
+    }
+}
 
 /// Текст по центру с переносом по ширине не больше `max_width`.
 /// Ширину ограничивает сама область: надпись egui иначе растягивает перенос на всю ширину.
@@ -13,6 +122,12 @@ pub fn centered_text(ui: &mut Ui, text: &str, size: f32, color: Color32, max_wid
         job.halign = egui::Align::Center;
         ui.label(job);
     });
+}
+
+/// Ширина переключателя-сегментов (без растягивания на всю ширину).
+pub fn segmented_width(ui: &Ui, labels: &[&str]) -> f32 {
+    let font = FontId::proportional(13.0);
+    labels.iter().map(|l| ui.painter().layout_no_wrap((*l).to_owned(), font.clone(), Color32::WHITE).size().x + 24.0).sum::<f32>() + 6.0
 }
 
 /// Переключатель-сегменты: подсветка выбранного варианта плавно «переезжает».
@@ -30,7 +145,7 @@ pub fn segmented(ui: &mut Ui, pal: &Palette, id: Id, labels: &[&str], selected: 
     let total: f32 = widths.iter().sum::<f32>() + inner * 2.0;
     let (rect, _) = ui.allocate_exact_size(vec2(total, h), Sense::hover());
     let painter = ui.painter().clone();
-    painter.rect_filled(rect, CornerRadius::same(9), if pal.dark { pal.bg.gamma_multiply(0.85) } else { pal.bg_hover });
+    painter.rect_filled(rect, CornerRadius::same(9), pal.segmented_bg);
     let mut xs = Vec::with_capacity(widths.len());
     let mut x = inner;
     for w in &widths {
@@ -44,7 +159,7 @@ pub fn segmented(ui: &mut Ui, pal: &Palette, id: Id, labels: &[&str], selected: 
     painter.rect(
         pill,
         CornerRadius::same(7),
-        if pal.dark { pal.bg_hover } else { Color32::WHITE },
+        pal.segmented_selected,
         Stroke::new(1.0, pal.border),
         egui::StrokeKind::Inside,
     );
@@ -60,6 +175,41 @@ pub fn segmented(ui: &mut Ui, pal: &Palette, id: Id, labels: &[&str], selected: 
         }
     }
     clicked
+}
+
+/// Выпадающий список: поле с текущим значением, по щелчку — список вариантов с отметкой
+/// у выбранного. Для выборов, которые со временем растут: язык, тема, шрифт.
+/// Возвращает выбранный вариант, если он сменился.
+pub fn dropdown<T: PartialEq + Clone>(ui: &mut Ui, pal: &Palette, id: Id, width: f32, current: &T, options: &[(T, String)]) -> Option<T> {
+    let label = options.iter().find(|(v, _)| v == current).map(|(_, l)| l.as_str()).unwrap_or("—");
+    // В узкой области список сжимается до доступной ширины.
+    let width = width.min(ui.available_width()).max(60.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
+    let resp = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
+    let painter = ui.painter();
+    let fill = if resp.hovered() || open { pal.control_hover } else { pal.input_bg };
+    let stroke = if open { pal.input_focus } else { pal.border };
+    painter.rect(rect, CornerRadius::same(7), fill, Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+    let text_rect = rect.shrink2(vec2(10.0, 0.0));
+    let galley = elide(ui, label, FontId::proportional(13.5), pal.text, rect.right() - 24.0 - text_rect.left());
+    painter.galley(pos2(text_rect.left(), rect.center().y - galley.size().y / 2.0), galley, pal.text);
+    painter.text(pos2(rect.right() - 13.0, rect.center().y), Align2::CENTER_CENTER, if open { "▴" } else { "▾" }, FontId::proportional(12.0), pal.text_muted);
+
+    let mut picked = None;
+    egui::Popup::menu(&resp).style(theme::menu_style).width(width).show(|ui| {
+        ui.set_min_width(width - 12.0);
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            for (value, text) in options {
+                let selected = value == current;
+                let mark = if selected { "✔" } else { "" };
+                if ui.add(egui::Button::new(text.as_str()).selected(selected).shortcut_text(mark).min_size(vec2(ui.available_width(), 0.0))).clicked() && !selected {
+                    picked = Some(value.clone());
+                }
+            }
+        });
+    });
+    picked
 }
 
 /// Пункт верхнего меню с плавным появлением содержимого.

@@ -77,6 +77,11 @@ impl Store {
         self.dir.as_ref().is_some_and(|d| d.is_dir())
     }
 
+    /// Есть ли уже файл компонента.
+    pub fn exists<C: Component>(&self) -> bool {
+        self.path(C::ID).is_some_and(|p| p.is_file())
+    }
+
     pub fn load<C: Component>(&mut self) -> C {
         let Some(path) = self.path(C::ID) else { return C::default() };
         let Ok(text) = std::fs::read_to_string(&path) else { return C::default() };

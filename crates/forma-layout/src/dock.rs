@@ -29,6 +29,10 @@ const RADIUS: u8 = 8;
 const MIN_AREA: f32 = 72.0;
 /// Размер нового отдельного окна, если размер исходной области неизвестен.
 const DEFAULT_WINDOW: Vec2 = vec2(720.0, 480.0);
+/// Уже этого вкладка не сжимается: лишние вкладки уходят в меню «»».
+const MIN_TAB: f32 = 76.0;
+/// Уже этого область прячет кнопку «+» в меню области.
+const ADD_BUTTON_MIN_W: f32 = 150.0;
 
 /// Что приложение рассказывает о своих вкладках и как рисует их содержимое.
 pub trait TabViewer {
@@ -794,19 +798,24 @@ impl<T> DockState<T> {
         let outline = style.border.lerp_to_gamma(style.accent.gamma_multiply(0.55), focus_t);
         painter.rect_stroke(rect, CornerRadius::same(RADIUS), Stroke::new(1.0, outline), StrokeKind::Inside);
 
-        // Кнопки справа в строке вкладок: «+» и меню области.
+        // Кнопки справа в строке вкладок: «+» и меню области. В узкой области «+» прячется
+        // в меню области, чтобы вкладкам осталось место.
         let btn = 24.0;
+        let show_add = rect.width() >= ADD_BUTTON_MIN_W;
         let menu_rect = Rect::from_center_size(pos2(header.right() - 6.0 - btn / 2.0, header.center().y), vec2(btn, btn));
         let add_rect = menu_rect.translate(vec2(-btn - 2.0, 0.0));
-        let tabs_rect = Rect::from_min_max(header.min + vec2(4.0, 0.0), pos2(add_rect.left() - 4.0, header.bottom()));
+        let buttons_left = if show_add { add_rect.left() } else { menu_rect.left() };
+        let tabs_rect = Rect::from_min_max(header.min + vec2(4.0, 0.0), pos2(buttons_left - 4.0, header.bottom()));
 
-        let add = icon_button(ui, add_rect, Id::new(("mycelium-dock-add", area.id)), "+", style).on_hover_text(t!("dock-add-editor"));
-        if let Some(tab) = egui::Popup::menu(&add).style(style.menu_style).show(|ui| viewer.add_menu(ui)).and_then(|r| r.inner) {
-            self.rt.ops.push(Op::Add { key, area: Some(area.id), tab });
+        if show_add {
+            let add = icon_button(ui, add_rect, Id::new(("mycelium-dock-add", area.id)), "+", style).on_hover_text(t!("dock-add-editor"));
+            if let Some(tab) = egui::Popup::menu(&add).style(style.menu_style).show(|ui| viewer.add_menu(ui)).and_then(|r| r.inner) {
+                self.rt.ops.push(Op::Add { key, area: Some(area.id), tab });
+            }
         }
         let menu = icon_button(ui, menu_rect, Id::new(("mycelium-dock-menu", area.id)), "⋯", style).on_hover_text(t!("dock-area-menu"));
         egui::Popup::menu(&menu).style(style.menu_style).show(|ui| {
-            self.area_menu(ui, key, area, maximized, style);
+            self.area_menu(ui, key, area, maximized, style, (!show_add).then_some(&mut *viewer));
         });
 
         // Вкладки.
@@ -821,12 +830,16 @@ impl<T> DockState<T> {
                 (12.0 + icon_w + text_w + 26.0).clamp(64.0, 240.0)
             })
             .collect();
-        let total: f32 = desired.iter().sum();
-        let scale = if total > tabs_rect.width() { (tabs_rect.width() / total).max(0.2) } else { 1.0 };
+        let plan = plan_tabs(&desired, area.active, tabs_rect.width());
         let mut x = tabs_rect.left();
         let mut tab_rects = Vec::with_capacity(titles.len());
         for (i, (title, icon, tab_id)) in titles.iter().enumerate() {
-            let w = (desired[i] * scale).max(36.0);
+            let Some(w) = plan.widths[i] else {
+                // Спрятанная вкладка: пустой прямоугольник у края — по нему считается место броска.
+                let edge = if i < plan.first { tabs_rect.left() - 1.0 } else { header.right() + 1.0 };
+                tab_rects.push(Rect::from_min_size(pos2(edge, header.top() + 4.0), vec2(0.0, HEADER_H - 4.0)));
+                continue;
+            };
             let r = Rect::from_min_max(pos2(x, header.top() + 4.0), pos2((x + w).min(tabs_rect.right()), header.bottom()));
             x += w + 2.0;
             tab_rects.push(r);
@@ -834,7 +847,9 @@ impl<T> DockState<T> {
             let active = i == area.active;
             let dragging_this = self.rt.drag.as_ref().is_some_and(|d| d.src == key && d.area == area.id && d.index == i);
             let resp = ui.interact(r, id, Sense::click_and_drag());
-            let close_hit = paint_tab(ui, &resp, r, id, title, icon.as_ref(), active, dragging_this, style);
+            let (close_hit, elided) = paint_tab(ui, &resp, r, id, title, icon.as_ref(), active, dragging_this, style);
+            // У обрезанной вкладки полное название — во всплывающей подсказке.
+            let resp = if elided && self.rt.drag.is_none() { resp.on_hover_text(title) } else { resp };
 
             if resp.drag_started() && self.rt.drag.is_none() {
                 self.rt.drag = Some(Drag {
@@ -860,6 +875,24 @@ impl<T> DockState<T> {
             });
         }
 
+        // Не поместившиеся вкладки — в меню «»» справа от видимых.
+        if plan.hidden() > 0 {
+            let more_rect = Rect::from_center_size(pos2(x + 12.0, header.center().y + 2.0), vec2(24.0, 24.0));
+            let more = icon_button(ui, more_rect, Id::new(("mycelium-dock-more", area.id)), "»", style).on_hover_text(t!("dock-more-tabs", count = plan.hidden()));
+            egui::Popup::menu(&more).style(style.menu_style).show(|ui| {
+                for (i, (title, icon, _)) in titles.iter().enumerate() {
+                    let text = match icon {
+                        Some((glyph, color)) => egui::RichText::new(format!("{glyph}  {title}")).color(if plan.widths[i].is_some() { style.text_muted } else { *color }),
+                        None => egui::RichText::new(title),
+                    };
+                    if ui.add(egui::Button::new(text).selected(i == area.active)).clicked() {
+                        area.active = i;
+                        self.rt.focused.insert(key, area.id);
+                    }
+                }
+            });
+        }
+
         // Содержимое активной вкладки.
         let mut child = ui.new_child(
             UiBuilder::new()
@@ -875,8 +908,17 @@ impl<T> DockState<T> {
         frame.areas.push(AreaRects { id: area.id, header, body, tabs: tab_rects });
     }
 
-    fn area_menu(&mut self, ui: &mut Ui, key: SurfaceKey, area: &Area<T>, maximized: bool, style: &DockStyle) {
+    /// Меню области. `add` — в узкой области сюда переезжает меню кнопки «+».
+    fn area_menu(&mut self, ui: &mut Ui, key: SurfaceKey, area: &Area<T>, maximized: bool, style: &DockStyle, add: Option<&mut impl TabViewer<Tab = T>>) {
         let id = area.id;
+        if let Some(viewer) = add {
+            let mut picked = None;
+            ui.menu_button(t!("dock-add-editor-button"), |ui| picked = viewer.add_menu(ui));
+            if let Some(tab) = picked {
+                self.rt.ops.push(Op::Add { key, area: Some(id), tab });
+            }
+            ui.separator();
+        }
         if ui.button(t!("dock-split-right")).clicked() {
             self.rt.ops.push(Op::SplitDuplicate { key, area: id, zone: Zone::Right });
         }
@@ -956,7 +998,56 @@ fn icon_button(ui: &mut Ui, rect: Rect, id: Id, glyph: &str, style: &DockStyle) 
     resp.on_hover_cursor(CursorIcon::PointingHand)
 }
 
-/// Рисует вкладку. Возвращает, наведён ли курсор на крестик закрытия.
+/// Как разложить вкладки в строке: ширина каждой видимой (`None` — вкладка спрятана
+/// в меню «»») и номер первой видимой.
+#[derive(Debug, PartialEq)]
+struct TabPlan {
+    widths: Vec<Option<f32>>,
+    first: usize,
+}
+
+impl TabPlan {
+    fn hidden(&self) -> usize {
+        self.widths.iter().filter(|w| w.is_none()).count()
+    }
+}
+
+/// Вкладки желаемой ширины `desired` в строке шириной `avail`: если не помещаются, сжимаются
+/// поровну, а если и так тесно — видны только соседние с активной, остальные уходят в меню.
+fn plan_tabs(desired: &[f32], active: usize, avail: f32) -> TabPlan {
+    const GAP: f32 = 2.0;
+    let n = desired.len();
+    if n == 0 {
+        return TabPlan { widths: Vec::new(), first: 0 };
+    }
+    let gaps = GAP * (n - 1) as f32;
+    let sum: f32 = desired.iter().sum();
+    if sum + gaps <= avail {
+        return TabPlan { widths: desired.iter().map(|w| Some(*w)).collect(), first: 0 };
+    }
+    let scale = ((avail - gaps) / sum).max(0.0);
+    let shrunk: Vec<f32> = desired.iter().map(|d| (d * scale).max(MIN_TAB.min(*d))).collect();
+    if shrunk.iter().sum::<f32>() + gaps <= avail + 0.5 {
+        return TabPlan { widths: shrunk.into_iter().map(Some).collect(), first: 0 };
+    }
+    // Место под кнопку «»» и столько вкладок наименьшей ширины, сколько влезет (хотя бы одна).
+    let room = (avail - 28.0).max(0.0);
+    let k = (((room + GAP) / (MIN_TAB + GAP)).floor() as usize).clamp(1, n);
+    let active = active.min(n.saturating_sub(1));
+    let first = if active < k { 0 } else { active + 1 - k };
+    let w = ((room - GAP * (k - 1) as f32) / k as f32).max(0.0);
+    let widths = (0..n).map(|i| (first..first + k).contains(&i).then_some(w)).collect();
+    TabPlan { widths, first }
+}
+
+/// Название вкладки в одну строку не шире `max_width`, с «…» на конце, если не влезло.
+fn elided_title(ui: &Ui, title: &str, color: Color32, max_width: f32) -> Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple_singleline(title.to_owned(), FontId::proportional(13.0), color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(max_width.max(0.0));
+    ui.painter().layout_job(job)
+}
+
+/// Рисует вкладку. Возвращает, наведён ли курсор на крестик закрытия и обрезано ли название.
 #[allow(clippy::too_many_arguments)]
 fn paint_tab(
     ui: &Ui,
@@ -968,7 +1059,7 @@ fn paint_tab(
     active: bool,
     dragging: bool,
     style: &DockStyle,
-) -> bool {
+) -> (bool, bool) {
     let ctx = ui.ctx();
     let a = ctx.animate_bool_with_time(id.with("active"), active, 0.18);
     let hover = ctx.animate_bool_with_time(id.with("hover"), resp.hovered(), 0.12);
@@ -986,18 +1077,27 @@ fn paint_tab(
     }
 
     let close_rect = Rect::from_center_size(pos2(rect.right() - 13.0, rect.center().y), Vec2::splat(16.0));
+    // Совсем узкой вкладке крестик не нужен: закрыть её можно средней кнопкой или из меню.
+    let closable = rect.width() >= 44.0;
     let mut x = rect.left() + 10.0;
     if let Some((glyph, color)) = icon {
         painter.text(pos2(x + 7.0, rect.center().y), Align2::CENTER_CENTER, glyph, FontId::proportional(13.0), color.gamma_multiply(fade));
         x += 20.0;
     }
     let text_color = style.text_muted.lerp_to_gamma(style.text_strong, a.max(hover * 0.6)).gamma_multiply(fade);
-    let galley = painter.layout_no_wrap(title.to_owned(), FontId::proportional(13.0), text_color);
-    let clip = Rect::from_min_max(rect.min, pos2(close_rect.left() - 3.0, rect.max.y)).intersect(ui.clip_rect());
-    ui.painter().with_clip_rect(clip).galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley, text_color);
+    let text_right = if closable { close_rect.left() - 3.0 } else { rect.right() - 6.0 };
+    let room = text_right - x;
+    let elided = if room >= 12.0 {
+        let galley = elided_title(ui, title, text_color, room);
+        let elided = galley.elided;
+        painter.galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley, text_color);
+        elided
+    } else {
+        true
+    };
 
-    let on_close = resp.hover_pos().is_some_and(|p| close_rect.contains(p));
-    if resp.hovered() || active {
+    let on_close = closable && resp.hover_pos().is_some_and(|p| close_rect.contains(p));
+    if closable && (resp.hovered() || active) {
         if on_close {
             painter.rect_filled(close_rect, CornerRadius::same(4), style.hover_bg);
         }
@@ -1006,7 +1106,7 @@ fn paint_tab(
     if resp.hovered() {
         ctx.set_cursor_icon(CursorIcon::PointingHand);
     }
-    on_close
+    (on_close, elided)
 }
 
 #[cfg(test)]
@@ -1054,6 +1154,30 @@ mod tests {
             "над строкой вкладок — вставка между вкладками"
         );
         assert_eq!(compute_target(&rects, pos2(2.0, 2.0)), Target::Nothing, "над рамкой окна — ничего");
+    }
+
+    #[test]
+    fn tabs_shrink_then_overflow_keeping_active_visible() {
+        let desired = [120.0, 120.0, 120.0, 120.0];
+        let all = plan_tabs(&desired, 0, 600.0);
+        assert_eq!(all.hidden(), 0);
+        assert_eq!(all.widths[0], Some(120.0));
+
+        let shrunk = plan_tabs(&desired, 0, 400.0);
+        assert_eq!(shrunk.hidden(), 0, "сначала вкладки сжимаются");
+        assert!(shrunk.widths.iter().all(|w| w.is_some_and(|w| (MIN_TAB..120.0).contains(&w))));
+
+        let tight = plan_tabs(&desired, 3, 200.0);
+        assert!(tight.hidden() > 0, "дальше лишние уходят в меню");
+        assert!(tight.widths[3].is_some(), "активная вкладка видна");
+        assert_eq!(tight.first + tight.widths.iter().flatten().count(), 4, "видны соседние с активной");
+
+        let tiny = plan_tabs(&desired, 1, 30.0);
+        assert_eq!(tiny.widths.iter().flatten().count(), 1, "хотя бы одна вкладка видна всегда");
+        assert!(tiny.widths[1].is_some());
+
+        assert_eq!(plan_tabs(&[], 0, -10.0).hidden(), 0, "пустая область при нулевой ширине не падает");
+        assert_eq!(plan_tabs(&desired, 0, -10.0).widths.iter().flatten().count(), 1);
     }
 
     struct V;

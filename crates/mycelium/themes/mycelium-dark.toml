@@ -1,0 +1,34 @@
+# Mycelium Dark Default — основа всех тем Forma Mycelium.
+# Цвета интерфейса по умолчанию уже тёмные, поэтому здесь только подсветка кода.
+# Полный список ключей с пояснениями — в шаблоне новой темы.
+
+[theme]
+name = "Mycelium Dark Default"
+id = "mycelium-dark"
+dark = true
+author = "FORMA"
+
+[colors]
+"editor.text" = "#c9d1e0"
+
+[syntax]
+comment = { color = "#7a86b6", italic = true }
+keyword = "#f472b6"
+operator = "#89ddff"
+string = "#9ece6a"
+escape = "#89ddff"
+number = "#ff9e64"
+function = "#7dcfff"
+type = "#e0af68"
+parameter = "#ffc78c"
+tag = "#f7768e"
+attribute = "#e0af68"
+preprocessor = "#bb9af7"
+annotation = "#bb9af7"
+punctuation = "#a9b1d6"
+heading = { color = "#7aa2f7", bold = true }
+bold = { color = "#e0af68", bold = true }
+italic = { color = "#f472b6", italic = true }
+inserted = "#9ece6a"
+deleted = "#f7768e"
+raw = "#7dcfff"

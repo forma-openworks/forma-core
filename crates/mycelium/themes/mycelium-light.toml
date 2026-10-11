@@ -1,0 +1,64 @@
+# Mycelium Light Default — светлая тема Forma Mycelium.
+
+[theme]
+name = "Mycelium Light Default"
+id = "mycelium-light"
+dark = false
+author = "FORMA"
+
+[colors]
+bg = "#ffffff"
+"bg.panel" = "#f6f7f9"
+"bg.header" = "#f1f2f6"
+"bg.deep" = "#dee1e7"
+"bg.elevated" = "#ffffff"
+"bg.hover" = "#e8eaf0"
+border = "#d6dae2"
+text = "#282c34"
+"text.muted" = "#5c6370"
+"text.faint" = "#969ca8"
+heading = "#111318"
+accent = "#6c54e6"
+"accent.soft" = "alpha($accent, 14%)"
+"accent.text" = "#ffffff"
+selection = "alpha($accent, 24%)"
+highlight = "#facc156e"
+success = "#16a34a"
+warning = "#ca8a04"
+danger = "#dc2626"
+shadow = "#0000002a"
+# На белом галочкам и кнопкам нужна рамка, иначе их не видно.
+"control.border" = "$border.strong"
+"segmented.bg" = "$bg.hover"
+"segmented.selected" = "#ffffff"
+"editor.text" = "#282c34"
+
+"origin.minecraft" = "#3e8c14"
+"origin.neoforge" = "#c8640a"
+"origin.fabric" = "#967846"
+"origin.forge" = "#285aa0"
+"origin.other-mod" = "#c026d3"
+"origin.library" = "#64748b"
+"origin.java" = "#965f28"
+
+[syntax]
+comment = { color = "#8088a0", italic = true }
+keyword = "#c42678"
+operator = "#007da0"
+string = "#22863a"
+escape = "#007da0"
+number = "#c25e00"
+function = "#0070b6"
+type = "#9c6800"
+parameter = "#aa5a14"
+tag = "#c82850"
+attribute = "#9c6800"
+preprocessor = "#7c3aed"
+annotation = "#7c3aed"
+punctuation = "#646a78"
+heading = { color = "#2563eb", bold = true }
+bold = { color = "#9c6800", bold = true }
+italic = { color = "#c42678", italic = true }
+inserted = "#22863a"
+deleted = "#c81e3c"
+raw = "#0070b6"

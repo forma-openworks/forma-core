@@ -70,6 +70,46 @@ fn add_source(bundle: &mut FluentBundle<FluentResource>, code: &str, name: &str,
     bundle.add_resource_overriding(resource);
 }
 
+/// Смешанный язык: интерфейс и термины одного языка, подсказки — другого.
+struct Blend {
+    code: &'static str,
+    /// Самоназвание в списке языков.
+    name: &'static str,
+    /// Язык интерфейса и терминов.
+    base: &'static str,
+    /// Язык подсказок.
+    hints: &'static str,
+}
+
+/// Английский интерфейс с русскими подсказками: меню, кнопки и термины — как в
+/// англоязычных руководствах по моддингу, а объяснения — по-русски.
+const BLENDS: &[Blend] = &[Blend { code: "en-RU", name: "English · русские подсказки", base: "en", hints: "ru" }];
+
+/// Подсказка ли это, а не элемент интерфейса или термин: пояснения, описания окон,
+/// пустые состояния, подсказки в полях ввода, объяснения известных ошибок.
+pub fn is_hint(key: &str) -> bool {
+    const SUFFIXES: &[&str] = &["-hint", "-about", "-explain", "-description", "-tagline"];
+    SUFFIXES.iter().any(|s| key.ends_with(s)) || key.starts_with("settings-component-")
+}
+
+/// Сообщения-подсказки из исходника `.ftl`: каждое сообщение — строка `id = …`
+/// и строки продолжения с отступом.
+fn hint_messages(source: &str) -> String {
+    let mut out = String::new();
+    let mut take = false;
+    for line in source.lines() {
+        let continues = line.starts_with([' ', '\t']) || (take && line.trim().is_empty());
+        if !continues {
+            take = line.split_once(" =").is_some_and(|(id, _)| is_hint(id.trim()));
+        }
+        if take {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 fn load(extra: Option<&Path>) -> State {
     let mut bundles: BTreeMap<String, FluentBundle<FluentResource>> = BTreeMap::new();
     for (code, files) in BUILTIN {
@@ -77,6 +117,18 @@ fn load(extra: Option<&Path>) -> State {
         for (name, source) in *files {
             add_source(bundle, code, name, (*source).to_owned());
         }
+    }
+    for blend in BLENDS {
+        let mut bundle = new_bundle(blend.base);
+        let files = |code: &str| BUILTIN.iter().find(|(c, _)| *c == code).map(|(_, f)| *f).unwrap_or(&[]);
+        for (name, source) in files(blend.base) {
+            add_source(&mut bundle, blend.code, name, (*source).to_owned());
+        }
+        for (name, source) in files(blend.hints) {
+            add_source(&mut bundle, blend.code, name, hint_messages(source));
+        }
+        add_source(&mut bundle, blend.code, "name", format!("language-name = {}\n", blend.name));
+        bundles.insert(blend.code.to_owned(), bundle);
     }
     if let Some(dir) = extra {
         load_extra(&mut bundles, dir);
@@ -333,6 +385,29 @@ mod tests {
         set_language("en");
         assert_eq!(t!("status-detached-windows", count = 1), "1 detached window");
         assert_eq!(t!("status-detached-windows", count = 5), "5 detached windows");
+    }
+
+    #[test]
+    fn blend_keeps_interface_english_and_hints_russian() {
+        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(languages().iter().any(|(code, name)| code == "en-RU" && name.contains("русские")));
+        set_language("en-RU");
+        // Интерфейс и термины — по-английски.
+        assert_eq!(tr("menu-file"), "File");
+        assert_eq!(tr("settings-page-keymap"), "Keymap");
+        // Подсказки — по-русски.
+        set_language("ru");
+        let ru_hint = tr("dock-empty-hint");
+        set_language("en-RU");
+        assert_eq!(tr("dock-empty-hint"), ru_hint);
+        assert!(is_hint("known-mixin-explain") && is_hint("settings-component-keymap") && !is_hint("known-mixin-title"));
+        set_language("en");
+    }
+
+    #[test]
+    fn hint_messages_take_whole_multiline_entries() {
+        let src = "menu-file = Файл\nsome-hint =\n    первая строка\n    вторая\n\n# комментарий\nother = нет\nlast-about = да\n";
+        assert_eq!(hint_messages(src), "some-hint =\n    первая строка\n    вторая\n\nlast-about = да\n");
     }
 
     #[test]
