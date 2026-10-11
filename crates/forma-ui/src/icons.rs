@@ -93,6 +93,7 @@ lucide! {
     "editor-exceptions" => "triangle-alert",
     "editor-console" => "square-terminal",
     "editor-model" => "box",
+    "editor-mods" => "puzzle",
     // Запуск.
     "run" => "play",
     "stop" => "square",
