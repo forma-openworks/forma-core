@@ -1,9 +1,9 @@
-# Mycelium Dark Default — основа всех тем Forma Mycelium.
+# Mycelium Dark — тема по умолчанию и основа всех тем Forma Mycelium.
 # Цвета интерфейса по умолчанию уже тёмные, поэтому здесь только подсветка кода.
 # Полный список ключей с пояснениями — в шаблоне новой темы.
 
 [theme]
-name = "Mycelium Dark Default"
+name = "Mycelium Dark"
 id = "mycelium-dark"
 dark = true
 author = "FORMA"

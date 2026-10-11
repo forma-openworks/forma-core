@@ -19,51 +19,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use egui::{self, Color32, CornerRadius, FontFamily, FontId, Shadow, Stroke, TextStyle, Visuals, style::ScrollStyle};
-use forma_i18n::t;
 use forma_layout::DockStyle;
-use serde::{Deserialize, Serialize};
 
 pub use file::{BackgroundSpec, Fit, FontsSpec, SyntaxSpec, ThemeFile, slug};
-pub use registry::{ThemeEntry, Themes};
-
-/// Акцентный цвет, которым можно перекрасить любую тему.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Accent {
-    Violet,
-    Blue,
-    Teal,
-    Green,
-    Amber,
-    Rose,
-}
-
-impl Accent {
-    pub const ALL: [Accent; 6] = [Accent::Violet, Accent::Blue, Accent::Teal, Accent::Green, Accent::Amber, Accent::Rose];
-
-    pub fn label(self) -> String {
-        match self {
-            Accent::Violet => t!("accent-violet"),
-            Accent::Blue => t!("accent-blue"),
-            Accent::Teal => t!("accent-teal"),
-            Accent::Green => t!("accent-green"),
-            Accent::Amber => t!("accent-amber"),
-            Accent::Rose => t!("accent-rose"),
-        }
-    }
-
-    pub fn color(self, dark: bool) -> Color32 {
-        let (d, l) = match self {
-            Accent::Violet => ((150, 132, 255), (108, 84, 230)),
-            Accent::Blue => ((96, 165, 250), (37, 99, 235)),
-            Accent::Teal => ((45, 212, 191), (13, 148, 136)),
-            Accent::Green => ((74, 222, 128), (22, 163, 74)),
-            Accent::Amber => ((251, 191, 36), (202, 138, 4)),
-            Accent::Rose => ((251, 113, 133), (225, 29, 72)),
-        };
-        let (r, g, b) = if dark { d } else { l };
-        Color32::from_rgb(r, g, b)
-    }
-}
+pub use registry::{Origin, ThemeEntry, Themes};
 
 /// Ключ темы: имя в файле, значение по умолчанию и описание (для шаблона новой темы).
 #[derive(Clone, Copy, Debug)]
@@ -111,7 +70,6 @@ macro_rules! theme_tokens {
 pub struct Resolver<'a> {
     file: &'a ThemeFile,
     defaults: HashMap<&'static str, &'static str>,
-    overrides: HashMap<&'static str, Color32>,
     cache: RefCell<HashMap<String, Color32>>,
     stack: RefCell<Vec<String>>,
     errors: RefCell<Vec<String>>,
@@ -120,12 +78,7 @@ pub struct Resolver<'a> {
 impl<'a> Resolver<'a> {
     pub fn new(file: &'a ThemeFile, groups: &[&'static [TokenInfo]]) -> Self {
         let defaults = groups.iter().flat_map(|g| g.iter()).map(|t| (t.key, t.default)).collect();
-        Self { file, defaults, overrides: HashMap::new(), cache: RefCell::default(), stack: RefCell::default(), errors: RefCell::default() }
-    }
-
-    /// Значение, которое важнее темы (например, акцент из настроек).
-    pub fn set(&mut self, key: &'static str, c: Color32) {
-        self.overrides.insert(key, c);
+        Self { file, defaults, cache: RefCell::default(), stack: RefCell::default(), errors: RefCell::default() }
     }
 
     pub fn dark(&self) -> bool {
@@ -160,9 +113,6 @@ impl<'a> Resolver<'a> {
     }
 
     fn lookup(&self, name: &str) -> Result<Color32, String> {
-        if let Some(c) = self.overrides.get(name) {
-            return Ok(*c);
-        }
         if let Some(c) = self.cache.borrow().get(name) {
             return Ok(*c);
         }
@@ -247,6 +197,12 @@ theme_tokens! {
         menubar_text = "menubar.text" => "$text",
         /// Пункт строки меню под указателем.
         menubar_hover = "menubar.hover" => "$bg.hover",
+        /// Кнопки окна «Свернуть» и «Развернуть» под указателем.
+        window_button_hover = "window.button.hover" => "$menubar.hover",
+        /// Кнопка окна «Закрыть» под указателем.
+        window_close_hover = "window.close.hover" => "#c42b1c",
+        /// Крестик кнопки «Закрыть» под указателем.
+        window_close_text = "window.close.text" => "#ffffff",
         /// Вкладка рабочего пространства.
         workspace_tab_text = "workspace.tab.text" => "mix($menubar.text, $menubar.bg, 30%)",
         /// Вкладка рабочего пространства под указателем.
@@ -433,17 +389,11 @@ pub struct Theme {
     pub errors: Vec<String>,
     /// Файл темы вместе с родителями: из него программа вычисляет свои таблицы ключей.
     pub file: Arc<ThemeFile>,
-    accent: Option<Color32>,
 }
 
 impl Theme {
-    /// `accent` — акцент из настроек поверх акцента темы.
-    pub fn resolve(file: ThemeFile, accent: Option<Accent>) -> Self {
-        let accent = accent.map(|a| a.color(file.theme.dark.unwrap_or(true)));
-        let mut r = Resolver::new(&file, &[Palette::TOKENS]);
-        if let Some(a) = accent {
-            r.set("accent", a);
-        }
+    pub fn resolve(file: ThemeFile) -> Self {
+        let r = Resolver::new(&file, &[Palette::TOKENS]);
         let pal = Palette::resolve(&r);
         let mut syntax = BTreeMap::new();
         for (class, spec) in &file.syntax {
@@ -493,7 +443,6 @@ impl Theme {
             icon_colors,
             errors,
             file: Arc::new(file),
-            accent,
         }
     }
 
@@ -501,19 +450,12 @@ impl Theme {
     pub fn with_resolver<R>(&self, groups: &[&'static [TokenInfo]], f: impl FnOnce(&Resolver) -> R) -> R {
         let mut all = vec![Palette::TOKENS];
         all.extend(groups.iter().copied());
-        let mut r = Resolver::new(&self.file, &all);
-        if let Some(a) = self.accent {
-            r.set("accent", a);
-        }
-        f(&r)
+        f(&Resolver::new(&self.file, &all))
     }
 
     /// Своя таблица ключей программы, вычисленная по этой же теме.
     pub fn group<T>(&self, tokens: &'static [TokenInfo], make: fn(&Resolver) -> T) -> T {
-        let mut r = Resolver::new(&self.file, &[Palette::TOKENS, tokens]);
-        if let Some(a) = self.accent {
-            r.set("accent", a);
-        }
+        let r = Resolver::new(&self.file, &[Palette::TOKENS, tokens]);
         let out = make(&r);
         for e in r.errors() {
             log::warn!("Theme {}: {e}", self.id);
@@ -668,7 +610,7 @@ mod tests {
     #[test]
     fn defaults_resolve_without_errors() {
         let file = ThemeFile::parse("[theme]\nid = \"empty\"\ndark = true").unwrap();
-        let t = Theme::resolve(file, None);
+        let t = Theme::resolve(file);
         assert!(t.errors.is_empty(), "{:?}", t.errors);
         assert_eq!(t.pal.menubar_bg, t.pal.bg_panel);
         assert_eq!(t.pal.dock_gap, t.pal.bg_deep);
@@ -678,24 +620,15 @@ mod tests {
     #[test]
     fn one_line_recolors_a_region() {
         let file = ThemeFile::parse("[theme]\nid = \"pink\"\n[palette]\npink = \"#ff69b4\"\n[colors]\n\"menubar.bg\" = \"$pink\"").unwrap();
-        let t = Theme::resolve(file, None);
+        let t = Theme::resolve(file);
         assert_eq!(t.pal.menubar_bg, Color32::from_rgb(255, 105, 180));
         assert_eq!(t.pal.statusbar_bg, t.pal.bg_panel, "остальное — как было");
     }
 
     #[test]
-    fn accent_override_flows_into_derived_keys() {
-        let file = ThemeFile::parse("[theme]\nid = \"t\"\ndark = true").unwrap();
-        let t = Theme::resolve(file, Some(Accent::Teal));
-        assert_eq!(t.pal.accent, Accent::Teal.color(true));
-        assert_eq!(t.pal.tab_indicator, t.pal.accent);
-        assert_eq!(t.pal.selection, color::with_alpha(t.pal.accent, 0.31));
-    }
-
-    #[test]
     fn broken_values_fall_back_and_report() {
         let file = ThemeFile::parse("[theme]\nid = \"b\"\n[colors]\n\"menubar.bg\" = \"$nope\"\n\"tab.hover\" = \"$tab.hover\"\nbg = \"#zzzzzz\"").unwrap();
-        let t = Theme::resolve(file, None);
+        let t = Theme::resolve(file);
         assert_eq!(t.pal.menubar_bg, t.pal.bg_panel, "сломанный ключ — по умолчанию");
         assert_eq!(t.pal.bg, Color32::from_rgb(28, 30, 36));
         assert!(t.errors.iter().any(|e| e.contains("nope")), "{:?}", t.errors);
@@ -706,7 +639,7 @@ mod tests {
     #[test]
     fn syntax_styles_resolve_references() {
         let file = ThemeFile::parse("[theme]\nid = \"s\"\n[palette]\nblue = \"#569cd6\"\n[syntax]\nkeyword = { color = \"$blue\", bold = true }\nstring = \"#ce9178\"").unwrap();
-        let t = Theme::resolve(file, None);
+        let t = Theme::resolve(file);
         assert_eq!(t.syntax("keyword"), SyntaxStyle { color: Color32::from_rgb(0x56, 0x9c, 0xd6), bold: true, italic: false, underline: false });
         assert_eq!(t.syntax("string").color, Color32::from_rgb(0xce, 0x91, 0x78));
         assert_eq!(t.syntax("unknown").color, t.pal.editor_text);

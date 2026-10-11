@@ -1,7 +1,7 @@
-# Mycelium Light Default — светлая тема Forma Mycelium.
+# Mycelium Light — светлая тема по умолчанию Forma Mycelium.
 
 [theme]
-name = "Mycelium Light Default"
+name = "Mycelium Light"
 id = "mycelium-light"
 dark = false
 author = "FORMA"

@@ -6,12 +6,16 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use super::{Accent, Theme, ThemeFile};
+use super::{Theme, ThemeFile};
 
 /// Откуда тема.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Origin {
+    /// Тема программы.
     Builtin,
+    /// Тема из плагина.
+    Plugin(PathBuf),
+    /// Своя тема из папки `themes`.
     File(PathBuf),
 }
 
@@ -83,13 +87,13 @@ impl Themes {
     }
 
     /// Вычисленная тема. Неизвестная — первая встроенная (её `fallback`).
-    pub fn resolve(&self, id: &str, fallback: &str, accent: Option<Accent>) -> Theme {
+    pub fn resolve(&self, id: &str, fallback: &str) -> Theme {
         let entry = self.get(id).or_else(|| self.get(fallback)).or_else(|| self.builtin.first());
         let file = match entry {
             Some(e) => self.merged(e, 0),
             None => ThemeFile::parse("[theme]\nid = \"fallback\"\ndark = true").unwrap_or_default(),
         };
-        Theme::resolve(file, accent)
+        Theme::resolve(file)
     }
 
     /// Тема вместе с родителями (`extends`).
@@ -133,7 +137,7 @@ impl Themes {
         self.user.clear();
         self.broken.clear();
         // Порядок: темы плагинов, потом свои — так своя тема заменяет тему плагина с тем же id.
-        let user = |p: &&PathBuf| self.dir.as_ref().is_some_and(|d| p.starts_with(d));
+        let user = |p: &PathBuf| self.dir.as_ref().is_some_and(|d| p.starts_with(d));
         let mut paths: Vec<&PathBuf> = self.stamps.keys().collect();
         paths.sort_by_key(|p| (user(p), (*p).clone()));
         for path in paths {
@@ -143,7 +147,8 @@ impl Themes {
                     f.dir = path.parent().map(Path::to_path_buf);
                     f.resolve_icon_paths();
                     self.user.retain(|u| u.id != f.theme.id);
-                    self.user.push(entry(f, Origin::File(path.clone())));
+                    let origin = if user(path) { Origin::File(path.clone()) } else { Origin::Plugin(path.clone()) };
+                    self.user.push(entry(f, origin));
                 }
                 Err(e) => {
                     log::warn!("Theme {} is broken: {e}", path.display());
@@ -178,14 +183,14 @@ mod tests {
         assert_eq!(themes.list().iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), vec!["base-dark", "pink"]);
         assert_eq!(themes.broken.len(), 1);
 
-        let pink = themes.resolve("pink", "base-dark", None);
+        let pink = themes.resolve("pink", "base-dark");
         assert!(pink.pal.dark, "тёмность унаследована от основы");
         assert_eq!(pink.pal.accent, egui::Color32::from_rgb(0x11, 0x22, 0x33), "акцент унаследован от основы");
         assert_eq!(pink.pal.menubar_bg, egui::Color32::from_rgb(255, 105, 180));
 
         // Без изменений — без перечитывания; неизвестная тема — запасная.
         assert!(!themes.poll(20.0));
-        assert_eq!(themes.resolve("nope", "base-dark", None).id, "base-dark");
+        assert_eq!(themes.resolve("nope", "base-dark").id, "base-dark");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

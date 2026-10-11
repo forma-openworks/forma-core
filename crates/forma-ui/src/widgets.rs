@@ -209,14 +209,28 @@ pub fn segmented(ui: &mut Ui, pal: &Palette, id: Id, labels: &[&str], selected: 
 /// у выбранного. Для выборов, которые со временем растут: язык, тема, шрифт.
 /// Возвращает выбранный вариант, если он сменился.
 pub fn dropdown<T: PartialEq + Clone>(ui: &mut Ui, pal: &Palette, id: Id, width: f32, current: &T, options: &[(T, String)]) -> Option<T> {
-    let options: Vec<(T, String, Option<&str>)> = options.iter().map(|(v, l)| (v.clone(), l.clone(), None)).collect();
-    dropdown_with_icons(ui, pal, id, width, current, &options)
+    let options: Vec<(T, String, Option<&str>, Option<&str>)> = options.iter().map(|(v, l)| (v.clone(), l.clone(), None, None)).collect();
+    dropdown_full(ui, pal, id, width, current, &options)
 }
 
 /// Как [`dropdown`], но у вариантов могут быть значки (имена из [`crate::icons`]).
 pub fn dropdown_with_icons<T: PartialEq + Clone>(ui: &mut Ui, pal: &Palette, id: Id, width: f32, current: &T, options: &[(T, String, Option<&str>)]) -> Option<T> {
+    let options: Vec<(T, String, Option<&str>, Option<&str>)> = options.iter().map(|(v, l, i)| (v.clone(), l.clone(), *i, None)).collect();
+    dropdown_full(ui, pal, id, width, current, &options)
+}
+
+/// Как [`dropdown`], но у вариантов может быть приглушённая пометка справа
+/// (например, «По умолчанию» у встроенных тем).
+pub fn dropdown_tagged<T: PartialEq + Clone>(ui: &mut Ui, pal: &Palette, id: Id, width: f32, current: &T, options: &[(T, String, Option<String>)]) -> Option<T> {
+    let options: Vec<(T, String, Option<&str>, Option<&str>)> = options.iter().map(|(v, l, tag)| (v.clone(), l.clone(), None, tag.as_deref())).collect();
+    dropdown_full(ui, pal, id, width, current, &options)
+}
+
+/// Выпадающий список: вариант, его значок и пометка справа.
+fn dropdown_full<T: PartialEq + Clone>(ui: &mut Ui, pal: &Palette, id: Id, width: f32, current: &T, options: &[(T, String, Option<&str>, Option<&str>)]) -> Option<T> {
     let chosen = options.iter().find(|(v, ..)| v == current);
-    let label = chosen.map(|(_, l, _)| l.as_str()).unwrap_or("—");
+    let label = chosen.map(|(_, l, ..)| l.as_str()).unwrap_or("—");
+    let tag_font = FontId::proportional(11.5);
     // В узкой области список сжимается до доступной ширины.
     let width = width.min(ui.available_width()).max(60.0);
     let (rect, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
@@ -227,11 +241,20 @@ pub fn dropdown_with_icons<T: PartialEq + Clone>(ui: &mut Ui, pal: &Palette, id:
     let stroke = if open { pal.input_focus } else { pal.border };
     painter.rect(rect, CornerRadius::same(7), fill, Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
     let mut x = rect.left() + 10.0;
-    if let Some(icon) = chosen.and_then(|(_, _, i)| *i) {
+    if let Some(icon) = chosen.and_then(|(_, _, i, _)| *i) {
         crate::icons::paint(painter, Rect::from_center_size(pos2(x + 7.0, rect.center().y), vec2(15.0, 15.0)), icon, pal.text);
         x += 22.0;
     }
-    let galley = elide(ui, label, FontId::proportional(13.5), pal.text, rect.right() - 24.0 - x);
+    // Пометка выбранного варианта — перед стрелкой, если рядом с названием есть место.
+    let mut text_right = rect.right() - 24.0;
+    if let Some(tag) = chosen.and_then(|(.., t)| *t) {
+        let g = painter.layout_no_wrap(tag.to_owned(), tag_font.clone(), pal.text_faint);
+        if text_right - g.size().x - 8.0 - x >= 80.0 {
+            text_right -= g.size().x + 8.0;
+            painter.galley(pos2(text_right + 8.0, rect.center().y - g.size().y / 2.0), g, pal.text_faint);
+        }
+    }
+    let galley = elide(ui, label, FontId::proportional(13.5), pal.text, text_right - x);
     painter.galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley, pal.text);
     let arrow = Rect::from_center_size(pos2(rect.right() - 13.0, rect.center().y), vec2(14.0, 14.0));
     crate::icons::paint(painter, arrow, if open { "chevron-up" } else { "chevron-down" }, pal.text_muted);
@@ -240,7 +263,7 @@ pub fn dropdown_with_icons<T: PartialEq + Clone>(ui: &mut Ui, pal: &Palette, id:
     egui::Popup::menu(&resp).style(theme::menu_style).width(width).show(|ui| {
         ui.set_min_width(width - 12.0);
         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-            for (value, text, icon) in options {
+            for (value, text, icon, tag) in options {
                 let selected = value == current;
                 let button = match icon {
                     Some(icon) => {
@@ -250,6 +273,10 @@ pub fn dropdown_with_icons<T: PartialEq + Clone>(ui: &mut Ui, pal: &Palette, id:
                     None => egui::Button::new(text.as_str()),
                 };
                 let resp = ui.add(button.selected(selected).min_size(vec2(ui.available_width(), 0.0)));
+                if let Some(tag) = tag {
+                    let color = if selected { ui.visuals().selection.stroke.color.gamma_multiply(0.75) } else { pal.text_faint };
+                    ui.painter().text(pos2(resp.rect.right() - 30.0, resp.rect.center().y), egui::Align2::RIGHT_CENTER, *tag, tag_font.clone(), color);
+                }
                 if selected {
                     let mark = Rect::from_center_size(pos2(resp.rect.right() - 14.0, resp.rect.center().y), vec2(14.0, 14.0));
                     crate::icons::paint(ui.painter(), mark, "check", ui.visuals().selection.stroke.color);

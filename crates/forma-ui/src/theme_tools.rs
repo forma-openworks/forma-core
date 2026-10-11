@@ -201,7 +201,7 @@ mod tests {
 
     #[test]
     fn template_is_a_valid_theme_that_extends_its_base() {
-        let base = Theme::resolve(ThemeFile::parse("[theme]\nid = \"base\"\nname = \"Base\"\ndark = true").unwrap(), None);
+        let base = Theme::resolve(ThemeFile::parse("[theme]\nid = \"base\"\nname = \"Base\"\ndark = true").unwrap());
         let kit = Kit { groups: vec![("Forma".into(), Palette::TOKENS)], syntax: vec!["keyword", "string"] };
         let text = template("My theme", "my-theme", &base, &kit);
         let parsed = ThemeFile::parse(&text).expect("шаблон — правильная тема");

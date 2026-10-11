@@ -2,8 +2,9 @@
 //! выполнения, наборы тем — ставится и убирается одной кнопкой.
 //!
 //! Плагин — папка `<plugins>/<id>` с `plugin.toml` (см. [`manifest`]) и содержимым.
-//! Что можно скачать, программа описывает каталогом ([`CatalogEntry`]): откуда взять
-//! архив и как проверить, что он годный. Наборы тем и другие плагины не из каталога
+//! Что можно поставить, программа описывает каталогом ([`CatalogEntry`]): откуда взять
+//! архив и как проверить, что он годный, или какие файлы плагин везёт в самой программе
+//! (так устроены небольшие наборы тем). Наборы тем и другие плагины не из каталога
 //! ставятся из `.zip` с `plugin.toml` внутри.
 //!
 //! Архивы скачиваются и распаковываются системными `curl` и `tar` (в Windows 10+ они есть
@@ -27,6 +28,8 @@ pub use manifest::{Contributes, Kind, Manifest, Meta};
 pub enum Source {
     /// Архив (`.tar.gz` или `.zip`) по ссылке.
     Download { url: &'static str },
+    /// Файлы внутри программы: путь в папке плагина и содержимое. Ставится без сети.
+    Bundled { files: &'static [(&'static str, &'static str)] },
     /// Появится в следующих версиях программы — в каталоге, но поставить пока нельзя.
     Later,
 }
@@ -54,6 +57,8 @@ pub struct CatalogEntry {
     pub recommended: bool,
     /// Проверка распакованного архива: есть ли в нём то, что нужно программе.
     pub validate: Option<Validate>,
+    /// Папка с темами внутри плагина, если он их приносит.
+    pub themes: Option<&'static str>,
 }
 
 /// Установленный плагин.
@@ -200,8 +205,28 @@ impl Plugins {
     }
 
     /// Начинает установку плагина из каталога в фоне. Уже идущая установка не повторяется.
+    /// Плагин из файлов программы ставится сразу.
     pub fn install(&mut self, entry: &CatalogEntry) {
-        let (Some(root), Source::Download { url }) = (self.root.clone(), &entry.source) else { return };
+        let Some(root) = self.root.clone() else { return };
+        let url = match &entry.source {
+            Source::Download { url } => *url,
+            Source::Bundled { files } => {
+                self.errors.remove(entry.id);
+                match install_bundled(&root, entry, files) {
+                    Ok(()) => {
+                        self.scan();
+                        self.events.push(Event::Installed(entry.id.to_owned()));
+                    }
+                    Err(error) => {
+                        log::warn!("Plugin {} failed to install: {error}", entry.id);
+                        self.errors.insert(entry.id.to_owned(), error.clone());
+                        self.events.push(Event::Failed { id: entry.id.to_owned(), error });
+                    }
+                }
+                return;
+            }
+            Source::Later => return,
+        };
         if self.jobs.contains_key(entry.id) {
             return;
         }
@@ -317,9 +342,25 @@ fn write_manifest(dir: &Path, entry: &CatalogEntry) -> Result<(), String> {
             homepage: entry.homepage.into(),
             installed: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs()),
         },
-        contributes: Contributes::default(),
+        contributes: Contributes { themes: entry.themes.map(Into::into) },
     };
     std::fs::write(dir.join("plugin.toml"), manifest.to_toml()).map_err(|e| e.to_string())
+}
+
+/// Пишет файлы плагина из программы и ставит его на место прежней версии.
+fn install_bundled(root: &Path, entry: &CatalogEntry, files: &[(&str, &str)]) -> Result<(), String> {
+    let staging = root.join(".staging").join(entry.id);
+    let _ = std::fs::remove_dir_all(&staging);
+    for (path, text) in files {
+        let target = staging.join(path);
+        if let Some(dir) = target.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        }
+        std::fs::write(&target, text).map_err(|e| format!("{}: {e}", target.display()))?;
+    }
+    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    write_manifest(&staging, entry)?;
+    replace_dir(&staging, &root.join(entry.id))
 }
 
 /// Скачивает архив, распаковывает, проверяет и ставит на место прежней версии.
@@ -463,7 +504,32 @@ mod tests {
             source: Source::Later,
             recommended: true,
             validate: Some(|dir| if dir.join("bin").is_dir() { Ok(()) } else { Err("no bin".into()) }),
+            themes: None,
         }
+    }
+
+    #[test]
+    fn bundled_theme_pack_installs_without_network() {
+        let base = temp("bundled");
+        let pack = CatalogEntry {
+            id: "pink-pack",
+            name: "Pink".into(),
+            kind: Kind::Themes,
+            icon: "palette",
+            source: Source::Bundled { files: &[("themes/pink.toml", "[theme]
+id = \"pink\"")] },
+            validate: None,
+            themes: Some("themes"),
+            ..entry()
+        };
+        let mut plugins = Plugins::new(Some(base.join("plugins")));
+        plugins.install(&pack);
+        let p = plugins.get("pink-pack").expect("установлен сразу");
+        assert_eq!(p.manifest.plugin.kind, Kind::Themes);
+        assert!(p.themes_dir().unwrap().join("pink.toml").is_file());
+        assert_eq!(plugins.take_events(), vec![Event::Installed("pink-pack".into())]);
+        assert!(!base.join("plugins").join(".staging").join("pink-pack").exists(), "черновая папка убрана");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

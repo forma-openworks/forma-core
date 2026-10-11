@@ -1,14 +1,14 @@
-//! Внешний вид — компонент настроек платформы и его страница: язык, тема, акцент,
-//! масштаб, фоновая картинка.
+//! Внешний вид — компонент настроек платформы и его страница: язык, тема, масштаб,
+//! фоновая картинка. Акцент — внутренний цвет темы, в настройках его нет.
 
 use std::path::{Path, PathBuf};
 
-use egui::{CursorIcon, RichText, Sense, Stroke, Ui, vec2};
+use egui::{RichText, Ui};
 use forma_i18n::t;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::settings_window::{self as sw, row};
-use crate::theme::{Accent, Fit, Palette};
+use crate::theme::{Fit, Palette};
 use crate::widgets;
 
 pub const PAGE: &str = "appearance";
@@ -21,8 +21,6 @@ pub struct Appearance {
     /// id темы; пусто — тема программы по умолчанию.
     #[serde(deserialize_with = "theme_id")]
     pub theme: String,
-    /// Свой акцент поверх темы; `None` — акцент темы.
-    pub accent: Option<Accent>,
     /// Масштаб всего интерфейса.
     pub zoom: f32,
     /// Своя фоновая картинка поверх картинки темы.
@@ -39,7 +37,6 @@ impl Default for Appearance {
         Self {
             language: None,
             theme: String::new(),
-            accent: None,
             zoom: 1.0,
             background: None,
             background_opacity: 0.12,
@@ -77,12 +74,12 @@ pub const ZOOM_RANGE: std::ops::RangeInclusive<f32> = 0.5..=3.0;
 pub struct ThemeOption {
     pub id: String,
     pub name: String,
+    /// Встроенная тема программы — помечается «По умолчанию».
+    pub builtin: bool,
 }
 
 /// Что странице нужно знать о программе.
 pub struct PageContext<'a> {
-    /// Папка своих переводов.
-    pub locales_dir: Option<&'a Path>,
     /// Папка своих тем.
     pub themes_dir: Option<&'a Path>,
     pub themes: &'a [ThemeOption],
@@ -94,7 +91,7 @@ pub struct PageContext<'a> {
 
 /// Подписи настроек страницы — для поиска.
 pub fn keywords() -> Vec<String> {
-    vec![t!("settings-language"), t!("settings-theme"), t!("settings-accent"), t!("settings-zoom"), t!("settings-background")]
+    vec![t!("settings-language"), t!("settings-theme"), t!("settings-zoom"), t!("settings-background")]
 }
 
 /// Что нажали на странице «Внешний вид».
@@ -122,17 +119,14 @@ pub fn page(ui: &mut Ui, pal: &Palette, search: &str, a: &mut Appearance, cx: &P
     if let Some(l) = pick {
         a.language = l;
     }
-    if let Some(dir) = cx.locales_dir {
-        sw::hint(ui, pal, &t!("settings-locales-hint", path = dir.display().to_string()));
-    }
 
     ui.add_space(8.0);
     sw::group(ui, pal, &t!("settings-group-look"));
     let current = if a.theme.is_empty() { cx.default_theme.to_owned() } else { a.theme.clone() };
-    let themes: Vec<(String, String)> = cx.themes.iter().map(|t| (t.id.clone(), t.name.clone())).collect();
+    let themes: Vec<(String, String, Option<String>)> = cx.themes.iter().map(|t| (t.id.clone(), t.name.clone(), t.builtin.then(|| t!("theme-default")))).collect();
     let mut pick = None;
     if row(ui, pal, search, &t!("settings-theme"), !a.theme.is_empty() && a.theme != cx.default_theme, |ui| {
-        pick = widgets::dropdown(ui, pal, sw::id(PAGE, "theme"), 300.0, &current, &themes);
+        pick = widgets::dropdown_tagged(ui, pal, sw::id(PAGE, "theme"), 300.0, &current, &themes);
     }) {
         a.theme = String::new();
     }
@@ -142,8 +136,7 @@ pub fn page(ui: &mut Ui, pal: &Palette, search: &str, a: &mut Appearance, cx: &P
     for e in cx.theme_errors.iter().take(5) {
         sw::warning(ui, pal, e);
     }
-    if let Some(dir) = cx.themes_dir {
-        sw::hint(ui, pal, &t!("settings-themes-hint", path = dir.display().to_string()));
+    if cx.themes_dir.is_some() {
         // Свои темы: шаблон на основе выбранной и папка, где они лежат.
         let indent = sw::label_indent(ui.available_width());
         ui.horizontal_wrapped(|ui| {
@@ -156,10 +149,6 @@ pub fn page(ui: &mut Ui, pal: &Palette, search: &str, a: &mut Appearance, cx: &P
             }
         });
         ui.add_space(4.0);
-    }
-
-    if row(ui, pal, search, &t!("settings-accent"), a.accent.is_some(), |ui| accent_picker(ui, pal, &mut a.accent)) {
-        a.accent = None;
     }
 
     if row(ui, pal, search, &t!("settings-zoom"), a.zoom != d.zoom, |ui| {
@@ -205,7 +194,6 @@ pub fn page(ui: &mut Ui, pal: &Palette, search: &str, a: &mut Appearance, cx: &P
     if let Some(f) = pick {
         a.background_fit = f;
     }
-    sw::hint(ui, pal, &t!("settings-background-hint"));
     action
 }
 
@@ -219,39 +207,20 @@ pub fn fit_label(f: Fit) -> String {
     }
 }
 
-/// «Из темы» и кружки акцентных цветов.
-pub fn accent_picker(ui: &mut Ui, pal: &Palette, accent: &mut Option<Accent>) {
-    if ui.add(egui::Button::new(t!("settings-accent-theme")).selected(accent.is_none())).clicked() {
-        *accent = None;
-    }
-    ui.add_space(4.0);
-    for a in Accent::ALL {
-        let (rect, resp) = ui.allocate_exact_size(vec2(26.0, 26.0), Sense::click());
-        let hover = ui.ctx().animate_bool_with_time(resp.id, resp.hovered(), 0.12);
-        let c = a.color(pal.dark);
-        ui.painter().circle_filled(rect.center(), 8.0 + hover * 1.5, c);
-        if *accent == Some(a) {
-            ui.painter().circle_stroke(rect.center(), 12.0, Stroke::new(2.0, c));
-        }
-        if resp.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(a.label()).clicked() {
-            *accent = Some(a);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn old_files_migrate() {
+        // Акцент из настроек первых версий больше не читается: это цвет темы.
         let a: Appearance = serde_json::from_str(r#"{"language":"ru","theme":"Light","accent":"Amber","font_size":16.0,"zoom":1.0}"#).unwrap();
         assert_eq!(a.theme, "mycelium-light");
-        assert_eq!(a.accent, Some(Accent::Amber));
         assert_eq!(a.legacy_font_size, Some(16.0));
         let back = serde_json::to_value(&a).unwrap();
         assert!(back.get("font_size").is_none(), "старое поле больше не пишется");
+        assert!(back.get("accent").is_none());
         let fresh: Appearance = serde_json::from_str(r#"{"theme":"vs-dark"}"#).unwrap();
-        assert_eq!((fresh.theme.as_str(), fresh.accent), ("vs-dark", None));
+        assert_eq!(fresh.theme, "vs-dark");
     }
 }

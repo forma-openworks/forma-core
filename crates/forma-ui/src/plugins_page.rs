@@ -8,7 +8,7 @@ use egui::{CornerRadius, Margin, RichText, Sense, Stroke, Ui, vec2};
 use forma_i18n::t;
 use forma_plugins::{CatalogEntry, Installed, Kind, PluginSettings, Plugins, Progress, Source};
 
-use crate::settings_window::{self as sw, matches};
+use crate::settings_window::matches;
 use crate::theme::Palette;
 
 pub const PAGE: &str = "plugins";
@@ -153,7 +153,7 @@ fn recommended(ui: &mut Ui, pal: &Palette, filter: &str, plugins: &Plugins, cata
                 (Source::Later, false, None) => {
                     ui.label(RichText::new(t!("plugins-coming")).size(12.0).color(pal.text_faint));
                 }
-                (Source::Download { .. }, false, None) => {
+                (Source::Download { .. } | Source::Bundled { .. }, false, None) => {
                     if crate::icons::text_button(ui, "download", t!("plugins-install")).clicked() {
                         actions.push(Action::Install(e.id.to_owned()));
                     }
@@ -218,7 +218,6 @@ fn installed(ui: &mut Ui, pal: &Palette, filter: &str, plugins: &Plugins, catalo
             },
         );
     }
-    sw::hint(ui, pal, &t!("plugins-enable-hint"));
 }
 
 /// Блок «Рекомендуемые плагины» для экрана приветствия: плагины, которые можно поставить
