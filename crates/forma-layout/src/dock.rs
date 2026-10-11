@@ -41,7 +41,7 @@ pub trait TabViewer {
     /// Подпись вкладки.
     fn title(&mut self, tab: &Self::Tab) -> String;
 
-    /// Значок перед подписью и его цвет.
+    /// Значок перед подписью — его имя (см. [`DockStyle::paint_icon`]) — и цвет.
     fn icon(&mut self, _tab: &Self::Tab) -> Option<(String, Color32)> {
         None
     }
@@ -83,6 +83,9 @@ pub struct DockStyle {
     pub border: Color32,
     /// Стиль всплывающих меню.
     pub menu_style: fn(&mut egui::Style),
+    /// Рисует значок по имени в прямоугольнике заданным цветом. `false` — такого значка
+    /// нет, и раскладка нарисует вместо него символ.
+    pub paint_icon: fn(&egui::Painter, Rect, &str, Color32) -> bool,
     /// Иконка отдельных окон.
     pub icon: Option<Arc<egui::IconData>>,
     /// Название программы — в заголовках отдельных окон.
@@ -808,12 +811,12 @@ impl<T> DockState<T> {
         let tabs_rect = Rect::from_min_max(header.min + vec2(4.0, 0.0), pos2(buttons_left - 4.0, header.bottom()));
 
         if show_add {
-            let add = icon_button(ui, add_rect, Id::new(("mycelium-dock-add", area.id)), "+", style).on_hover_text(t!("dock-add-editor"));
+            let add = icon_button(ui, add_rect, Id::new(("mycelium-dock-add", area.id)), ("add", "+"), style).on_hover_text(t!("dock-add-editor"));
             if let Some(tab) = egui::Popup::menu(&add).style(style.menu_style).show(|ui| viewer.add_menu(ui)).and_then(|r| r.inner) {
                 self.rt.ops.push(Op::Add { key, area: Some(area.id), tab });
             }
         }
-        let menu = icon_button(ui, menu_rect, Id::new(("mycelium-dock-menu", area.id)), "⋯", style).on_hover_text(t!("dock-area-menu"));
+        let menu = icon_button(ui, menu_rect, Id::new(("mycelium-dock-menu", area.id)), ("more", "⋯"), style).on_hover_text(t!("dock-area-menu"));
         egui::Popup::menu(&menu).style(style.menu_style).show(|ui| {
             self.area_menu(ui, key, area, maximized, style, (!show_add).then_some(&mut *viewer));
         });
@@ -878,14 +881,17 @@ impl<T> DockState<T> {
         // Не поместившиеся вкладки — в меню «»» справа от видимых.
         if plan.hidden() > 0 {
             let more_rect = Rect::from_center_size(pos2(x + 12.0, header.center().y + 2.0), vec2(24.0, 24.0));
-            let more = icon_button(ui, more_rect, Id::new(("mycelium-dock-more", area.id)), "»", style).on_hover_text(t!("dock-more-tabs", count = plan.hidden()));
+            let more = icon_button(ui, more_rect, Id::new(("mycelium-dock-more", area.id)), ("overflow", "»"), style).on_hover_text(t!("dock-more-tabs", count = plan.hidden()));
             egui::Popup::menu(&more).style(style.menu_style).show(|ui| {
                 for (i, (title, icon, _)) in titles.iter().enumerate() {
-                    let text = match icon {
-                        Some((glyph, color)) => egui::RichText::new(format!("{glyph}  {title}")).color(if plan.widths[i].is_some() { style.text_muted } else { *color }),
-                        None => egui::RichText::new(title),
-                    };
-                    if ui.add(egui::Button::new(text).selected(i == area.active)).clicked() {
+                    // Место под значок слева от названия; видимые вкладки — приглушённо.
+                    let color = if plan.widths[i].is_some() { style.text_muted } else { style.text };
+                    let resp = ui.add(egui::Button::new(egui::RichText::new(format!("      {title}")).color(color)).selected(i == area.active));
+                    if let Some((name, tint)) = icon {
+                        let r = Rect::from_center_size(resp.rect.left_center() + vec2(ui.spacing().button_padding.x + 8.0, 0.0), vec2(14.0, 14.0));
+                        (style.paint_icon)(ui.painter(), r, name, if plan.widths[i].is_some() { tint.gamma_multiply(0.6) } else { *tint });
+                    }
+                    if resp.clicked() {
                         area.active = i;
                         self.rt.focused.insert(key, area.id);
                     }
@@ -986,15 +992,18 @@ impl<T> DockState<T> {
     }
 }
 
-/// Небольшая кнопка-значок в строке вкладок.
-fn icon_button(ui: &mut Ui, rect: Rect, id: Id, glyph: &str, style: &DockStyle) -> egui::Response {
+/// Небольшая кнопка-значок в строке вкладок: имя значка и символ на случай, если значка нет.
+fn icon_button(ui: &mut Ui, rect: Rect, id: Id, (name, glyph): (&str, &str), style: &DockStyle) -> egui::Response {
     let resp = ui.interact(rect, id, Sense::click());
     let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
     let t = ui.ctx().animate_bool_with_time(id.with("hover"), resp.hovered() || open, 0.12);
     if t > 0.0 {
         ui.painter().rect_filled(rect, CornerRadius::same(6), style.hover_bg.gamma_multiply(t));
     }
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(16.0), style.text_muted.lerp_to_gamma(style.text_strong, t));
+    let color = style.text_muted.lerp_to_gamma(style.text_strong, t);
+    if !(style.paint_icon)(ui.painter(), Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), name, color) {
+        ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(16.0), color);
+    }
     resp.on_hover_cursor(CursorIcon::PointingHand)
 }
 
@@ -1080,8 +1089,11 @@ fn paint_tab(
     // Совсем узкой вкладке крестик не нужен: закрыть её можно средней кнопкой или из меню.
     let closable = rect.width() >= 44.0;
     let mut x = rect.left() + 10.0;
-    if let Some((glyph, color)) = icon {
-        painter.text(pos2(x + 7.0, rect.center().y), Align2::CENTER_CENTER, glyph, FontId::proportional(13.0), color.gamma_multiply(fade));
+    if let Some((name, color)) = icon {
+        let r = Rect::from_center_size(pos2(x + 7.0, rect.center().y), vec2(14.0, 14.0));
+        if !(style.paint_icon)(&painter, r, name, color.gamma_multiply(fade)) {
+            painter.text(r.center(), Align2::CENTER_CENTER, name, FontId::proportional(13.0), color.gamma_multiply(fade));
+        }
         x += 20.0;
     }
     let text_color = style.text_muted.lerp_to_gamma(style.text_strong, a.max(hover * 0.6)).gamma_multiply(fade);
@@ -1101,7 +1113,10 @@ fn paint_tab(
         if on_close {
             painter.rect_filled(close_rect, CornerRadius::same(4), style.hover_bg);
         }
-        painter.text(close_rect.center(), Align2::CENTER_CENTER, "×", FontId::proportional(14.0), style.text_muted.gamma_multiply(a.max(hover) * fade));
+        let color = style.text_muted.gamma_multiply(a.max(hover) * fade);
+        if !(style.paint_icon)(&painter, close_rect.shrink(3.0), "close", color) {
+            painter.text(close_rect.center(), Align2::CENTER_CENTER, "×", FontId::proportional(14.0), color);
+        }
     }
     if resp.hovered() {
         ctx.set_cursor_icon(CursorIcon::PointingHand);

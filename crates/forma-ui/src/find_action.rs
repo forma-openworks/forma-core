@@ -1,7 +1,7 @@
 //! «Найти действие» (`Ctrl+Shift+A`), как в JetBrains: поиск по всем командам
 //! программы и страницам настроек, с их сочетаниями клавиш.
 
-use egui::{Align2, CornerRadius, FontId, Key, Margin, Modifiers, RichText, Sense, TextEdit, Ui, pos2, vec2};
+use egui::{Align2, CornerRadius, FontId, Key, Modifiers, RichText, Sense, Ui, pos2, vec2};
 use forma_i18n::t;
 
 use crate::theme::Palette;
@@ -58,7 +58,7 @@ impl FindAction {
             }
         }
 
-        let edit = ui.add(TextEdit::singleline(&mut self.query).hint_text(format!("🔍 {}", t!("find-action-hint"))).desired_width(f32::INFINITY).margin(Margin::symmetric(10, 8)).font(FontId::proportional(15.0)));
+        let edit = crate::widgets::search_field(ui, egui::Id::new("forma-find-action"), &mut self.query, &t!("find-action-hint"), f32::INFINITY, 15.0);
         if std::mem::take(&mut self.focus) {
             edit.request_focus();
         }

@@ -37,8 +37,13 @@ impl AppInfo {
         home.or_else(|| dirs::config_dir().map(|d| d.join("Forma"))).map(|d| d.join(self.dir_name))
     }
 
-    /// Кеши, индексы, языковые серверы: `%LOCALAPPDATA%\Forma\<программа>`.
+    /// Кеши, индексы, плагины: `%LOCALAPPDATA%\Forma\<программа>`, а с `FORMA_CONFIG_HOME` —
+    /// `$FORMA_CONFIG_HOME\<программа>\cache` (переносная установка и проверки не трогают
+    /// настоящие плагины и кеши).
     pub fn cache_dir(&self) -> Option<PathBuf> {
+        if let Some(home) = std::env::var_os(CONFIG_HOME_VAR).filter(|v| !v.is_empty()) {
+            return Some(PathBuf::from(home).join(self.dir_name).join("cache"));
+        }
         dirs::data_local_dir().map(|d| d.join("Forma").join(self.dir_name))
     }
 }

@@ -97,8 +97,17 @@ pub fn keywords() -> Vec<String> {
     vec![t!("settings-language"), t!("settings-theme"), t!("settings-accent"), t!("settings-zoom"), t!("settings-background")]
 }
 
+/// Что нажали на странице «Внешний вид».
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageAction {
+    /// Создать свою тему из шаблона на основе выбранной.
+    CreateTheme,
+    OpenThemesFolder,
+}
+
 /// Страница «Внешний вид».
-pub fn page(ui: &mut Ui, pal: &Palette, search: &str, a: &mut Appearance, cx: &PageContext) {
+pub fn page(ui: &mut Ui, pal: &Palette, search: &str, a: &mut Appearance, cx: &PageContext) -> Option<PageAction> {
+    let mut action = None;
     let d = Appearance::default();
 
     sw::group(ui, pal, &t!("settings-group-language"));
@@ -131,10 +140,22 @@ pub fn page(ui: &mut Ui, pal: &Palette, search: &str, a: &mut Appearance, cx: &P
         a.theme = id;
     }
     for e in cx.theme_errors.iter().take(5) {
-        sw::hint(ui, pal, &format!("⚠ {e}"));
+        sw::warning(ui, pal, e);
     }
     if let Some(dir) = cx.themes_dir {
         sw::hint(ui, pal, &t!("settings-themes-hint", path = dir.display().to_string()));
+        // Свои темы: шаблон на основе выбранной и папка, где они лежат.
+        let indent = sw::label_indent(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            ui.add_space(indent);
+            if crate::icons::text_button(ui, "palette", t!("settings-theme-create")).on_hover_text(t!("settings-theme-create-hint")).clicked() {
+                action = Some(PageAction::CreateTheme);
+            }
+            if crate::icons::text_button(ui, "open", t!("settings-theme-open-folder")).clicked() {
+                action = Some(PageAction::OpenThemesFolder);
+            }
+        });
+        ui.add_space(4.0);
     }
 
     if row(ui, pal, search, &t!("settings-accent"), a.accent.is_some(), |ui| accent_picker(ui, pal, &mut a.accent)) {
@@ -185,6 +206,7 @@ pub fn page(ui: &mut Ui, pal: &Palette, search: &str, a: &mut Appearance, cx: &P
         a.background_fit = f;
     }
     sw::hint(ui, pal, &t!("settings-background-hint"));
+    action
 }
 
 pub fn fit_label(f: Fit) -> String {

@@ -23,7 +23,7 @@ use forma_i18n::t;
 use forma_layout::DockStyle;
 use serde::{Deserialize, Serialize};
 
-pub use file::{BackgroundSpec, Fit, FontsSpec, SyntaxSpec, ThemeFile};
+pub use file::{BackgroundSpec, Fit, FontsSpec, SyntaxSpec, ThemeFile, slug};
 pub use registry::{ThemeEntry, Themes};
 
 /// Акцентный цвет, которым можно перекрасить любую тему.
@@ -425,6 +425,10 @@ pub struct Theme {
     pub syntax: BTreeMap<String, SyntaxStyle>,
     pub fonts: FontsSpec,
     pub background: Option<Background>,
+    /// Свои значки темы: имя значка → SVG (см. [`crate::icons`]).
+    pub icons: BTreeMap<String, PathBuf>,
+    /// Цвета значков из ключей `icon.<имя>`: главнее цвета, которым значок рисуется по месту.
+    pub icon_colors: BTreeMap<String, Color32>,
     /// Ошибки в файле темы — показываются в настройках.
     pub errors: Vec<String>,
     /// Файл темы вместе с родителями: из него программа вычисляет свои таблицы ключей.
@@ -457,6 +461,18 @@ impl Theme {
             };
             syntax.insert(class.clone(), SyntaxStyle { color, bold, italic, underline });
         }
+        // Цвет значка: «icon.имя» в [colors] — например, "icon.run" = "$green".
+        let mut icon_colors = BTreeMap::new();
+        for (key, expr) in &file.colors {
+            if let Some(name) = key.strip_prefix("icon.") {
+                match r.eval(expr) {
+                    Ok(c) => {
+                        icon_colors.insert(name.to_owned(), c);
+                    }
+                    Err(e) => r.error(format!("{key}: {e}")),
+                }
+            }
+        }
         let background = file.background.as_ref().filter(|b| !b.image.trim().is_empty()).map(|b| {
             let path = PathBuf::from(&b.image);
             let image = if path.is_relative() { file.dir.as_ref().map(|d| d.join(&path)).unwrap_or(path) } else { path };
@@ -473,10 +489,23 @@ impl Theme {
             syntax,
             fonts: file.fonts.clone(),
             background,
+            icons: file.icons.iter().map(|(name, path)| (name.clone(), PathBuf::from(path))).collect(),
+            icon_colors,
             errors,
             file: Arc::new(file),
             accent,
         }
+    }
+
+    /// Вычислитель ключей этой темы для групп `groups` (для инструментов авторов тем).
+    pub fn with_resolver<R>(&self, groups: &[&'static [TokenInfo]], f: impl FnOnce(&Resolver) -> R) -> R {
+        let mut all = vec![Palette::TOKENS];
+        all.extend(groups.iter().copied());
+        let mut r = Resolver::new(&self.file, &all);
+        if let Some(a) = self.accent {
+            r.set("accent", a);
+        }
+        f(&r)
     }
 
     /// Своя таблица ключей программы, вычисленная по этой же теме.
@@ -513,6 +542,7 @@ impl Palette {
             accent: self.tab_indicator,
             border: self.area_border,
             menu_style,
+            paint_icon: crate::icons::paint,
             icon: Some(icon),
             app_title: app_title.to_owned(),
             maximize_keys,

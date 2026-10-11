@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use egui::text::{LayoutJob, TextWrapping};
-use egui::{Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Galley, Id, Layout, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
+use egui::{Align, Color32, CornerRadius, CursorIcon, FontId, Galley, Id, Layout, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 
 use crate::theme::{self, Palette};
 
@@ -42,6 +42,34 @@ pub fn elide_start(ui: &Ui, text: &str, font: FontId, color: Color32, max_width:
         }
     }
     best.unwrap_or_else(|| elide(ui, text, font, color, max_width))
+}
+
+/// Поле поиска: значок лупы слева и подсказка. `font` — размер текста.
+pub fn search_field(ui: &mut Ui, id: Id, text: &mut String, hint: &str, width: f32, font: f32) -> egui::Response {
+    let pad = (font * 0.55).round();
+    let left = (pad + font + 6.0) as i8;
+    let edit = egui::TextEdit::singleline(text)
+        .id(id)
+        .hint_text(hint)
+        .font(FontId::proportional(font))
+        .desired_width(width)
+        .margin(egui::Margin { left, right: pad as i8, top: (pad * 0.75) as i8, bottom: (pad * 0.75) as i8 });
+    let resp = ui.add(edit);
+    let icon = Rect::from_center_size(pos2(resp.rect.left() + pad + font / 2.0, resp.rect.center().y), vec2(font, font));
+    let color = ui.visuals().widgets.inactive.fg_stroke.color.gamma_multiply(0.7);
+    crate::icons::paint(ui.painter(), icon, "search", color);
+    resp
+}
+
+/// Подпись со значком слева, текст переносится по ширине.
+pub fn icon_label(ui: &mut Ui, icon: &str, text: impl Into<String>, size: f32, color: Color32) -> egui::Response {
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        let (rect, _) = ui.allocate_exact_size(vec2(size + 1.0, size * 1.3), Sense::hover());
+        crate::icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(size, size)), icon, color);
+        ui.add(egui::Label::new(egui::RichText::new(text.into()).size(size).color(color)).wrap())
+    })
+    .inner
 }
 
 /// Ширина обычной кнопки с текстом `text` (с учётом наименьшей ширины `min`).
@@ -181,7 +209,14 @@ pub fn segmented(ui: &mut Ui, pal: &Palette, id: Id, labels: &[&str], selected: 
 /// у выбранного. Для выборов, которые со временем растут: язык, тема, шрифт.
 /// Возвращает выбранный вариант, если он сменился.
 pub fn dropdown<T: PartialEq + Clone>(ui: &mut Ui, pal: &Palette, id: Id, width: f32, current: &T, options: &[(T, String)]) -> Option<T> {
-    let label = options.iter().find(|(v, _)| v == current).map(|(_, l)| l.as_str()).unwrap_or("—");
+    let options: Vec<(T, String, Option<&str>)> = options.iter().map(|(v, l)| (v.clone(), l.clone(), None)).collect();
+    dropdown_with_icons(ui, pal, id, width, current, &options)
+}
+
+/// Как [`dropdown`], но у вариантов могут быть значки (имена из [`crate::icons`]).
+pub fn dropdown_with_icons<T: PartialEq + Clone>(ui: &mut Ui, pal: &Palette, id: Id, width: f32, current: &T, options: &[(T, String, Option<&str>)]) -> Option<T> {
+    let chosen = options.iter().find(|(v, ..)| v == current);
+    let label = chosen.map(|(_, l, _)| l.as_str()).unwrap_or("—");
     // В узкой области список сжимается до доступной ширины.
     let width = width.min(ui.available_width()).max(60.0);
     let (rect, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
@@ -191,19 +226,35 @@ pub fn dropdown<T: PartialEq + Clone>(ui: &mut Ui, pal: &Palette, id: Id, width:
     let fill = if resp.hovered() || open { pal.control_hover } else { pal.input_bg };
     let stroke = if open { pal.input_focus } else { pal.border };
     painter.rect(rect, CornerRadius::same(7), fill, Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
-    let text_rect = rect.shrink2(vec2(10.0, 0.0));
-    let galley = elide(ui, label, FontId::proportional(13.5), pal.text, rect.right() - 24.0 - text_rect.left());
-    painter.galley(pos2(text_rect.left(), rect.center().y - galley.size().y / 2.0), galley, pal.text);
-    painter.text(pos2(rect.right() - 13.0, rect.center().y), Align2::CENTER_CENTER, if open { "▴" } else { "▾" }, FontId::proportional(12.0), pal.text_muted);
+    let mut x = rect.left() + 10.0;
+    if let Some(icon) = chosen.and_then(|(_, _, i)| *i) {
+        crate::icons::paint(painter, Rect::from_center_size(pos2(x + 7.0, rect.center().y), vec2(15.0, 15.0)), icon, pal.text);
+        x += 22.0;
+    }
+    let galley = elide(ui, label, FontId::proportional(13.5), pal.text, rect.right() - 24.0 - x);
+    painter.galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley, pal.text);
+    let arrow = Rect::from_center_size(pos2(rect.right() - 13.0, rect.center().y), vec2(14.0, 14.0));
+    crate::icons::paint(painter, arrow, if open { "chevron-up" } else { "chevron-down" }, pal.text_muted);
 
     let mut picked = None;
     egui::Popup::menu(&resp).style(theme::menu_style).width(width).show(|ui| {
         ui.set_min_width(width - 12.0);
         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-            for (value, text) in options {
+            for (value, text, icon) in options {
                 let selected = value == current;
-                let mark = if selected { "✔" } else { "" };
-                if ui.add(egui::Button::new(text.as_str()).selected(selected).shortcut_text(mark).min_size(vec2(ui.available_width(), 0.0))).clicked() && !selected {
+                let button = match icon {
+                    Some(icon) => {
+                        let color = if selected { ui.visuals().selection.stroke.color } else { ui.visuals().widgets.inactive.fg_stroke.color };
+                        egui::Button::new((crate::icons::image(ui.ctx(), icon, crate::icons::SIZE - 2.0, color), text.as_str()))
+                    }
+                    None => egui::Button::new(text.as_str()),
+                };
+                let resp = ui.add(button.selected(selected).min_size(vec2(ui.available_width(), 0.0)));
+                if selected {
+                    let mark = Rect::from_center_size(pos2(resp.rect.right() - 14.0, resp.rect.center().y), vec2(14.0, 14.0));
+                    crate::icons::paint(ui.painter(), mark, "check", ui.visuals().selection.stroke.color);
+                }
+                if resp.clicked() && !selected {
                     picked = Some(value.clone());
                 }
             }
@@ -219,11 +270,22 @@ pub fn dropdown<T: PartialEq + Clone>(ui: &mut Ui, pal: &Palette, id: Id, width:
 /// `keep_open` — меню не закрывается по щелчку внутри (для переключателей);
 /// обычные пункты в таком меню закрывают его сами через `ui.close()`.
 pub fn top_menu(ui: &mut Ui, title: &str, keep_open: bool, add: impl FnOnce(&mut Ui)) {
+    top_menu_with(ui, egui::Button::new(title), title, keep_open, add);
+}
+
+/// Пункт верхнего меню со значком вместо названия (например, «☰» в узком окне).
+pub fn top_menu_icon(ui: &mut Ui, icon: &str, hint: &str, keep_open: bool, add: impl FnOnce(&mut Ui)) {
+    let color = ui.visuals().widgets.inactive.fg_stroke.color;
+    let img = crate::icons::image(ui.ctx(), icon, crate::icons::SIZE, color);
+    top_menu_with(ui, egui::Button::new(img), icon, keep_open, add).on_hover_text(hint);
+}
+
+fn top_menu_with(ui: &mut Ui, button: egui::Button<'_>, id_salt: &str, keep_open: bool, add: impl FnOnce(&mut Ui)) -> egui::Response {
     use egui::containers::menu::MenuConfig;
     use egui::containers::SetOpenCommand;
     use egui::Popup;
     let ctx = ui.ctx().clone();
-    let fade_id = ui.id().with(("menu-fade", title));
+    let fade_id = ui.id().with(("menu-fade", id_salt));
     // Заголовок открытого меню подсвечен.
     let resp = ui
         .scope(|ui| {
@@ -231,7 +293,7 @@ pub fn top_menu(ui: &mut Ui, title: &str, keep_open: bool, add: impl FnOnce(&mut
                 let w = &mut ui.style_mut().visuals.widgets;
                 w.inactive.weak_bg_fill = w.open.weak_bg_fill;
             }
-            ui.add(egui::Button::new(title))
+            ui.add(button)
         })
         .inner;
     let popup_id = Popup::default_response_id(&resp);
@@ -273,7 +335,7 @@ pub fn top_menu(ui: &mut Ui, title: &str, keep_open: bool, add: impl FnOnce(&mut
     if inner.is_none() {
         ctx.animate_bool_with_time(fade_id, false, 0.0);
         ctx.data_mut(|d| d.remove::<f64>(away_id));
-        return;
+        return resp;
     }
     if by_hover {
         // Курсор над заголовком или над любым всплывающим слоем (само меню и подменю).
@@ -295,5 +357,6 @@ pub fn top_menu(ui: &mut Ui, title: &str, keep_open: bool, add: impl FnOnce(&mut
             }
         }
     }
+    resp
 }
 

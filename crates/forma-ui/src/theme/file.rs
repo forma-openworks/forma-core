@@ -26,6 +26,10 @@
 //! image = "wolf.png"             # путь от папки темы
 //! opacity = 0.12
 //! fit = "cover"
+//!
+//! [icons]                        # свои значки (необязательно), пути от папки темы
+//! folder = "icons"               # каждый `имя.svg` в этой папке заменяет значок «имя»
+//! run = "my-run.svg"             # или по одному
 //! ```
 
 use std::collections::BTreeMap;
@@ -113,6 +117,8 @@ pub struct ThemeFile {
     pub syntax: BTreeMap<String, SyntaxSpec>,
     pub fonts: FontsSpec,
     pub background: Option<BackgroundSpec>,
+    /// Свои значки: имя значка → путь к SVG; `folder` — папка, где `имя.svg` заменяет значок.
+    pub icons: BTreeMap<String, String>,
     /// Папка файла темы: от неё считаются пути к картинкам.
     #[serde(skip)]
     pub dir: Option<PathBuf>,
@@ -150,7 +156,36 @@ impl ThemeFile {
             out.background = self.background.clone();
             out.dir = self.dir.clone();
         }
+        out.icons.extend(self.icons.clone());
         out
+    }
+
+    /// Пути к значкам — от папки темы, папка `folder` раскрыта в отдельные значки.
+    /// Вызывается, когда известна папка файла: после этого тему можно наследовать
+    /// из другой папки, и пути не собьются.
+    pub fn resolve_icon_paths(&mut self) {
+        let Some(dir) = self.dir.clone() else { return };
+        let abs = |p: &str| {
+            let path = PathBuf::from(p);
+            if path.is_relative() { dir.join(path) } else { path }
+        };
+        let mut icons = BTreeMap::new();
+        if let Some(folder) = self.icons.get("folder") {
+            for e in std::fs::read_dir(abs(folder)).into_iter().flatten().flatten() {
+                let path = e.path();
+                if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("svg")) {
+                    if let Some(name) = path.file_stem() {
+                        icons.insert(name.to_string_lossy().into_owned(), path.display().to_string());
+                    }
+                }
+            }
+        }
+        for (name, path) in &self.icons {
+            if name != "folder" {
+                icons.insert(name.clone(), abs(path).display().to_string());
+            }
+        }
+        self.icons = icons;
     }
 }
 
@@ -206,6 +241,21 @@ fit = "tile"
         assert_eq!(f.fonts.editor.as_deref(), Some("Cascadia Mono"));
         let bg = f.background.unwrap();
         assert_eq!((bg.image.as_str(), bg.fit, bg.opacity), ("wolf.png", Fit::Tile, 0.12));
+    }
+
+    #[test]
+    fn icon_paths_resolve_from_theme_folder() {
+        let dir = std::env::temp_dir().join(format!("forma-theme-icons-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("icons")).unwrap();
+        std::fs::write(dir.join("icons").join("trash.svg"), "<svg/>").unwrap();
+        std::fs::write(dir.join("icons").join("readme.txt"), "").unwrap();
+        let mut f = ThemeFile::parse("[theme]\nid = \"t\"\n[icons]\nfolder = \"icons\"\nrun = \"my-run.svg\"").unwrap();
+        f.dir = Some(dir.clone());
+        f.resolve_icon_paths();
+        assert_eq!(f.icons.keys().collect::<Vec<_>>(), vec!["run", "trash"]);
+        assert_eq!(PathBuf::from(&f.icons["run"]), dir.join("my-run.svg"));
+        assert_eq!(PathBuf::from(&f.icons["trash"]), dir.join("icons").join("trash.svg"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1,6 +1,6 @@
-//! Список тем: встроенные (их передаёт программа) и свои — файлы `*.toml` в папке
-//! `themes` настроек программы. Свои темы перечитываются на лету: сохранила файл
-//! в любом редакторе — тема обновилась.
+//! Список тем: встроенные (их передаёт программа), свои — файлы `*.toml` в папке
+//! `themes` настроек программы — и темы из плагинов. Свои темы перечитываются на лету:
+//! сохранила файл в любом редакторе — тема обновилась.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,6 +30,8 @@ pub struct Themes {
     /// Ошибки разбора своих тем: путь → текст.
     pub broken: Vec<(PathBuf, String)>,
     dir: Option<PathBuf>,
+    /// Папки тем из плагинов.
+    plugin_dirs: Vec<PathBuf>,
     stamps: HashMap<PathBuf, SystemTime>,
     last_scan: f64,
 }
@@ -50,13 +52,23 @@ impl Themes {
                 }
             })
             .collect();
-        let mut t = Self { builtin, user: Vec::new(), broken: Vec::new(), dir, stamps: HashMap::new(), last_scan: f64::NEG_INFINITY };
+        let mut t = Self { builtin, user: Vec::new(), broken: Vec::new(), dir, plugin_dirs: Vec::new(), stamps: HashMap::new(), last_scan: f64::NEG_INFINITY };
         t.scan();
         t
     }
 
     pub fn dir(&self) -> Option<&Path> {
         self.dir.as_deref()
+    }
+
+    /// Папки тем из плагинов. `true` — список сменился и темы перечитаны.
+    pub fn set_plugin_dirs(&mut self, dirs: Vec<PathBuf>) -> bool {
+        if self.plugin_dirs == dirs {
+            return false;
+        }
+        self.plugin_dirs = dirs;
+        self.scan();
+        true
     }
 
     /// Все темы: сначала встроенные, потом свои. Своя тема с тем же id заменяет встроенную.
@@ -104,11 +116,12 @@ impl Themes {
     }
 
     fn stamps(&self) -> HashMap<PathBuf, SystemTime> {
-        let Some(dir) = &self.dir else { return HashMap::new() };
-        let Ok(entries) = std::fs::read_dir(dir) else { return HashMap::new() };
-        entries
-            .flatten()
-            .map(|e| e.path())
+        // Сначала темы плагинов, потом свои: своя тема с тем же id главнее.
+        self.plugin_dirs
+            .iter()
+            .chain(self.dir.iter())
+            .filter_map(|dir| std::fs::read_dir(dir).ok())
+            .flat_map(|entries| entries.flatten().map(|e| e.path()))
             .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("toml")))
             .filter_map(|p| Some((p.clone(), std::fs::metadata(&p).ok()?.modified().ok()?)))
             .collect()
@@ -119,13 +132,16 @@ impl Themes {
         self.stamps = self.stamps();
         self.user.clear();
         self.broken.clear();
+        // Порядок: темы плагинов, потом свои — так своя тема заменяет тему плагина с тем же id.
+        let user = |p: &&PathBuf| self.dir.as_ref().is_some_and(|d| p.starts_with(d));
         let mut paths: Vec<&PathBuf> = self.stamps.keys().collect();
-        paths.sort();
+        paths.sort_by_key(|p| (user(p), (*p).clone()));
         for path in paths {
             let parsed = std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|t| ThemeFile::parse(&t));
             match parsed {
                 Ok(mut f) => {
                     f.dir = path.parent().map(Path::to_path_buf);
+                    f.resolve_icon_paths();
                     self.user.retain(|u| u.id != f.theme.id);
                     self.user.push(entry(f, Origin::File(path.clone())));
                 }

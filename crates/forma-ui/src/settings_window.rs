@@ -5,7 +5,7 @@
 //! рисует их содержимое. Изменения копятся в черновике программы и применяются
 //! кнопками «Применить» и «ОК».
 
-use egui::{Align, Color32, CornerRadius, CursorIcon, FontId, Id, Layout, Margin, Rect, RichText, Sense, Stroke, TextEdit, Ui, UiBuilder, pos2, vec2};
+use egui::{Align, Color32, CornerRadius, CursorIcon, FontId, Id, Layout, Rect, RichText, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use forma_i18n::t;
 
 use crate::theme::Palette;
@@ -153,7 +153,7 @@ impl SettingsWindow {
     }
 
     fn search_field(&mut self, ui: &mut Ui) {
-        let search = ui.add(TextEdit::singleline(&mut self.search).hint_text(format!("🔍 {}", t!("settings-search-hint"))).desired_width(f32::INFINITY).margin(Margin::symmetric(8, 6)));
+        let search = crate::widgets::search_field(ui, Id::new("forma-settings-search"), &mut self.search, &t!("settings-search-hint"), f32::INFINITY, 13.5);
         if std::mem::take(&mut self.focus_search) {
             search.request_focus();
         }
@@ -169,7 +169,7 @@ fn footer_buttons(ui: &mut Ui, pal: &Palette, rect: Rect, dirty: bool) -> Option
     let bw = crate::widgets::button_width;
     let main_w = bw(ui, &ok, 96.0) + bw(ui, &apply, 84.0) + bw(ui, &cancel, 84.0) + gap * 2.0;
     let extra_w = bw(ui, &import, 0.0) + bw(ui, &export, 0.0) + gap * 2.0 + 16.0;
-    let more_w = bw(ui, "⋯", 0.0) + gap + 8.0;
+    let more_w = ui.spacing().interact_size.y + gap + 8.0;
     let roomy = main_w + extra_w <= rect.width();
     let tight = main_w + more_w > rect.width();
     let mut out = None;
@@ -182,7 +182,7 @@ fn footer_buttons(ui: &mut Ui, pal: &Palette, rect: Rect, dirty: bool) -> Option
             out = Some(Footer::Export);
         }
     } else {
-        let more = footer_ui.button("⋯").on_hover_text(format!("{import} · {export}"));
+        let more = crate::icons::button(&mut footer_ui, "more", false).on_hover_text(format!("{import} · {export}"));
         egui::Popup::menu(&more).style(crate::theme::menu_style).show(|ui| {
             if ui.button(&import).clicked() {
                 out = Some(Footer::Import);
@@ -274,7 +274,7 @@ pub fn row(ui: &mut Ui, pal: &Palette, search: &str, label: &str, modified: bool
                 add(ui);
             });
             if modified {
-                reset = ui.add(egui::Button::new(RichText::new("↺").color(pal.text_muted)).frame(false)).on_hover_text(t!("settings-reset")).clicked();
+                reset = crate::icons::flat_button(ui, "reset", pal.text_muted).on_hover_text(t!("settings-reset")).clicked();
             }
         });
         reset
@@ -314,7 +314,7 @@ pub fn check(ui: &mut Ui, pal: &Palette, search: &str, label: &str, value: &mut 
             ui.painter().rect_filled(r.expand2(vec2(3.0, 1.0)), CornerRadius::same(4), highlight(pal));
         }
         if modified {
-            reset = ui.add(egui::Button::new(RichText::new("↺").color(pal.text_muted)).frame(false)).on_hover_text(t!("settings-reset")).clicked();
+            reset = crate::icons::flat_button(ui, "reset", pal.text_muted).on_hover_text(t!("settings-reset")).clicked();
         }
     });
     ui.add_space(2.0);
@@ -324,6 +324,20 @@ pub fn check(ui: &mut Ui, pal: &Palette, search: &str, label: &str, value: &mut 
 /// Подсветка совпадения с поиском.
 pub fn highlight(pal: &Palette) -> Color32 {
     pal.highlight
+}
+
+/// Отступ слева, с которого на странице шириной `width` начинаются элементы настроек.
+pub fn label_indent(width: f32) -> f32 {
+    label_width(width).map_or(0.0, |w| w + 8.0)
+}
+
+/// Предупреждение под настройкой: значок и мелкий текст.
+pub fn warning(ui: &mut Ui, pal: &Palette, text: &str) {
+    let indent = label_width(ui.available_width()).map_or(0.0, |w| w + ui.spacing().item_spacing.x);
+    ui.horizontal(|ui| {
+        ui.add_space(indent);
+        crate::widgets::icon_label(ui, "warning", text, 11.5, pal.warning);
+    });
 }
 
 /// Пояснение под настройкой мелким текстом.

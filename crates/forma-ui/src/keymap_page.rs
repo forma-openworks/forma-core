@@ -2,7 +2,7 @@
 //! записывается нажатием, занятые сочетания показываются сразу, изменённые действия
 //! выделены акцентом и возвращаются к стандартным одной кнопкой.
 
-use egui::{Align2, CornerRadius, CursorIcon, Event, FontId, Id, Key, Margin, Rect, RichText, Sense, Stroke, TextEdit, Ui, pos2, vec2};
+use egui::{CornerRadius, CursorIcon, Event, FontId, Id, Key, Margin, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
 use forma_actions::{Action, Keymap, Registry, Shortcut, Title};
 use forma_i18n::t;
 
@@ -55,7 +55,7 @@ impl KeymapPage {
             0.0,
             |ui| {
                 let width = ui.available_width().min(300.0);
-                ui.add(TextEdit::singleline(filter).id(Id::new("forma-keymap-filter")).hint_text(format!("🔍 {}", t!("keymap-search-hint"))).desired_width(width).margin(Margin::symmetric(8, 5)));
+                crate::widgets::search_field(ui, Id::new("forma-keymap-filter"), filter, &t!("keymap-search-hint"), width, 13.0);
             },
             |ui| {
                 if !keymap.overrides.is_empty() && ui.button(t!("keymap-reset-all")).clicked() {
@@ -121,22 +121,22 @@ impl KeymapPage {
         }
         ui.painter().galley(text_pos, galley, color);
 
-        // Справа налево: «↺», «+», сочетания.
+        // Справа налево: сброс, добавление, сочетания.
         let mut x = rect.right() - 8.0;
-        let button = |ui: &mut Ui, x: &mut f32, glyph: &str, hint: String| {
+        let button = |ui: &mut Ui, x: &mut f32, icon: &str, hint: String| {
             let r = Rect::from_center_size(pos2(*x - 11.0, keys_y), vec2(22.0, 22.0));
             *x -= 26.0;
-            let b = ui.interact(r, ui.id().with((&a.id, glyph)), Sense::click());
+            let b = ui.interact(r, ui.id().with((&a.id, icon)), Sense::click());
             if b.hovered() {
                 ui.painter().rect_filled(r, CornerRadius::same(5), pal.bg_elevated);
             }
-            ui.painter().text(r.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(14.0), pal.text_muted);
+            crate::icons::paint(ui.painter(), r.shrink(3.0), icon, pal.text_muted);
             b.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(hint).clicked()
         };
-        if modified && button(ui, &mut x, "↺", t!("keymap-reset")) {
+        if modified && button(ui, &mut x, "reset", t!("keymap-reset")) {
             keymap.reset(&a.id);
         }
-        if button(ui, &mut x, "+", t!("keymap-add")) {
+        if button(ui, &mut x, "add", t!("keymap-add")) {
             self.capture = Some(Capture { action: a.id.clone(), key: None });
         }
         if keys.is_empty() {
@@ -151,7 +151,7 @@ impl KeymapPage {
             ui.painter().rect(chip, CornerRadius::same(6), if hit { sw::highlight(pal) } else { pal.chip_bg }, Stroke::new(1.0, pal.chip_border), egui::StrokeKind::Inside);
             ui.painter().galley(pos2(chip.left() + 8.0, chip.center().y - g.size().y / 2.0), g, pal.text);
             let cross = if c.hovered() { pal.danger } else { pal.text_faint };
-            ui.painter().text(pos2(chip.right() - 10.0, chip.center().y), Align2::CENTER_CENTER, "×", FontId::proportional(13.0), cross);
+            crate::icons::paint(ui.painter(), Rect::from_center_size(pos2(chip.right() - 10.0, chip.center().y), vec2(11.0, 11.0)), "close", cross);
             if c.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(t!("keymap-remove", shortcut = text)).clicked() {
                 keymap.remove(registry, &a.id, *key);
             }
@@ -198,7 +198,7 @@ impl KeymapPage {
                 let others = keymap.conflicts(registry, k, id);
                 if !others.is_empty() {
                     let names: Vec<String> = others.iter().filter_map(|o| registry.get(o)).map(title).collect();
-                    ui.label(RichText::new(format!("⚠ {}", t!("keymap-conflict", actions = names.join(", ")))).size(12.0).color(pal.warning));
+                    crate::widgets::icon_label(ui, "warning", t!("keymap-conflict", actions = names.join(", ")), 12.0, pal.warning);
                 }
             }
         });
