@@ -26,7 +26,7 @@ pub fn keywords(kit: &Kit) -> Vec<String> {
     let mut out = vec![t!("theme-tokens-colors"), t!("theme-tokens-icons"), t!("theme-tokens-syntax")];
     out.extend(kit.groups.iter().flat_map(|(_, tokens)| tokens.iter().map(|tk| tk.key.to_owned())));
     out.extend(kit.syntax.iter().map(|c| (*c).to_owned()));
-    out.extend(crate::icons::LUCIDE_NAMES.iter().map(|(n, _)| (*n).to_owned()));
+    out.extend(crate::icons::all_names().iter().map(|(n, _)| (*n).to_owned()));
     out
 }
 
@@ -73,7 +73,7 @@ pub fn template(name: &str, id: &str, base: &Theme, kit: &Kit) -> String {
     });
     line("# ── Значки · Icons ──");
     line("# Цвет значка по имени главнее цвета по месту. Свой значок без currentColor цвет не меняет.");
-    for (name, _) in crate::icons::LUCIDE_NAMES {
+    for (name, _) in crate::icons::all_names() {
         line(&format!("# \"icon.{name}\" = \"$accent\""));
     }
     line("");
@@ -96,7 +96,7 @@ pub fn template(name: &str, id: &str, base: &Theme, kit: &Kit) -> String {
     line("[icons]                            # свои значки (SVG), пути от папки темы");
     line("# folder = \"icons\"                 # каждый «имя.svg» в этой папке заменяет значок «имя»");
     line("# Значки и рисунок Lucide (https://lucide.dev), которым каждый нарисован сейчас:");
-    for (name, lucide) in crate::icons::LUCIDE_NAMES {
+    for (name, lucide) in crate::icons::all_names() {
         line(&format!("# {name} = \"icons/{name}.svg\"      # {lucide}"));
     }
     out
@@ -142,7 +142,8 @@ pub fn inspector(ui: &mut Ui, pal: &Palette, search: &str, theme: &Theme, kit: &
         ui.add_space(6.0);
     }
 
-    let icons: Vec<&(&str, &str)> = crate::icons::LUCIDE_NAMES.iter().filter(|(n, l)| fits(n, l)).collect();
+    let all = crate::icons::all_names();
+    let icons: Vec<&(&str, &str)> = all.iter().filter(|(n, l)| fits(n, l)).collect();
     if !icons.is_empty() {
         sw::group(ui, pal, &t!("theme-tokens-icons"));
         note(ui, t!("theme-tokens-icons-hint"));

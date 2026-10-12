@@ -20,6 +20,23 @@ pub fn semibold() -> FontFamily {
     FontFamily::Name("semibold".into())
 }
 
+/// Курсив шрифта интерфейса (для текста заметок, описаний, подписей).
+pub fn italic() -> FontFamily {
+    FontFamily::Name("italic".into())
+}
+
+/// Жирный курсив шрифта интерфейса.
+pub fn bold_italic() -> FontFamily {
+    FontFamily::Name("bolditalic".into())
+}
+
+static UI_HAS_ITALIC: AtomicBool = AtomicBool::new(false);
+
+/// Есть ли у шрифта интерфейса настоящий курсив (иначе egui наклоняет обычное начертание).
+pub fn ui_has_italic() -> bool {
+    UI_HAS_ITALIC.load(Ordering::Relaxed)
+}
+
 /// Шрифт редактора кода: обычный, жирный, курсив.
 pub fn editor(bold: bool, italic: bool) -> FontFamily {
     FontFamily::Name(
@@ -191,6 +208,20 @@ fn face(family: Option<&str>, weight: u16, italic: bool, fallback: &[&str]) -> O
     family.and_then(|f| load_face(f, weight, italic)).or_else(|| load_first(fallback))
 }
 
+/// Свои семейства программ (например, шрифт формул у заметок): дописываются к шрифтам
+/// платформы при каждой установке.
+fn extras() -> &'static std::sync::RwLock<Vec<fn(&mut FontDefinitions)>> {
+    static EXTRAS: OnceLock<std::sync::RwLock<Vec<fn(&mut FontDefinitions)>>> = OnceLock::new();
+    EXTRAS.get_or_init(Default::default)
+}
+
+/// Добавляет свои шрифты программы. `add` получает уже собранные шрифты платформы (в них
+/// есть `ui-regular`, `ui-italic`, `editor-regular` и т. д.) и дописывает свои данные и
+/// семейства. Вызывать при запуске, до первой установки шрифтов.
+pub fn register_extra(add: fn(&mut FontDefinitions)) {
+    extras().write().unwrap_or_else(|e| e.into_inner()).push(add);
+}
+
 /// Устанавливает шрифты в egui.
 pub fn install(ctx: &egui::Context, choice: &Choice) {
     let mut defs = FontDefinitions::default();
@@ -208,6 +239,7 @@ pub fn install(ctx: &egui::Context, choice: &Choice) {
     let ui_semibold = add("ui-semibold", face(ui, 600, false, UI_SEMIBOLD));
     let ui_italic = add("ui-italic", face(ui, 400, true, UI_ITALIC));
     let ui_bold_italic = add("ui-bolditalic", face(ui, 700, true, UI_BOLD_ITALIC));
+    UI_HAS_ITALIC.store(ui_italic.is_some(), Ordering::Relaxed);
 
     let ed = choice.editor.as_deref();
     let ed_regular = add("editor-regular", face(ed, 400, false, MONO_REGULAR));
@@ -247,5 +279,8 @@ pub fn install(ctx: &egui::Context, choice: &Choice) {
     defs.families.insert(editor(true, true), chain(&[&ed_bold_italic, &ed_bold, &ed_italic, &ed_regular], true));
     defs.families.insert(console(false), chain(&[&co_regular], true));
     defs.families.insert(console(true), chain(&[&co_bold, &co_regular], true));
+    for add in extras().read().unwrap_or_else(|e| e.into_inner()).iter() {
+        add(&mut defs);
+    }
     ctx.set_fonts(defs);
 }

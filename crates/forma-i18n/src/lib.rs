@@ -1,8 +1,10 @@
 //! Локализация интерфейса программ Forma на Fluent.
 //!
-//! Переводы лежат в `locales/<язык>/*.ftl` в корне репозитория и вшиваются в программу
-//! при сборке. Дополнительные языки можно положить в папку настроек (`locales/<язык>/*.ftl`):
-//! они подхватываются при запуске без пересборки и могут переопределять встроенные строки.
+//! Строки самой платформы лежат в `locales/<язык>/*.ftl` этого крейта и вшиваются в него.
+//! Каждая программа (и общие крейты со своими строками, вроде оболочки) вшивает свои
+//! переводы сборочным скриптом (`forma_build::locales`) и передаёт их в [`init_with`].
+//! Дополнительные языки можно положить в папку настроек (`locales/<язык>/*.ftl`): они
+//! подхватываются при запуске без пересборки и могут переопределять встроенные строки.
 //!
 //! В коде интерфейса строки берутся только через [`t!`]:
 //!
@@ -21,7 +23,26 @@ use unic_langid::LanguageIdentifier;
 
 pub use fluent_bundle::{FluentArgs, FluentValue};
 
+/// Встроенные переводы: код языка и его файлы `.ftl` (имя, содержимое). Такую таблицу
+/// пишет `forma_build::locales`.
+pub type Locales = &'static [(&'static str, &'static [(&'static str, &'static str)])];
+
+// Строки платформы: `pub static PLATFORM`.
 include!(concat!(env!("OUT_DIR"), "/locales.rs"));
+
+/// Переводы программы, переданные в [`init_with`] (строки платформы к ним добавляются всегда).
+static SOURCES: RwLock<Vec<Locales>> = RwLock::new(Vec::new());
+
+/// Все встроенные переводы: сначала платформа, потом то, что передала программа.
+fn sources() -> Vec<Locales> {
+    let extra = SOURCES.read().unwrap_or_else(|e| e.into_inner());
+    std::iter::once(PLATFORM as Locales).chain(extra.iter().copied()).collect()
+}
+
+/// Файлы языка `code` во всех наборах.
+fn files_of<'a>(sources: &'a [Locales], code: &'a str) -> impl Iterator<Item = &'static (&'static str, &'static str)> + 'a {
+    sources.iter().flat_map(move |set| set.iter().filter(move |(c, _)| *c == code).flat_map(|(_, files)| files.iter()))
+}
 
 /// Язык, к которому откатываемся, если строки нет в выбранном.
 pub const FALLBACK: &str = "en";
@@ -111,20 +132,22 @@ fn hint_messages(source: &str) -> String {
 }
 
 fn load(extra: Option<&Path>) -> State {
+    let sources = sources();
     let mut bundles: BTreeMap<String, FluentBundle<FluentResource>> = BTreeMap::new();
-    for (code, files) in BUILTIN {
-        let bundle = bundles.entry((*code).to_owned()).or_insert_with(|| new_bundle(code));
-        for (name, source) in *files {
-            add_source(bundle, code, name, (*source).to_owned());
+    for set in &sources {
+        for (code, files) in *set {
+            let bundle = bundles.entry((*code).to_owned()).or_insert_with(|| new_bundle(code));
+            for (name, source) in *files {
+                add_source(bundle, code, name, (*source).to_owned());
+            }
         }
     }
     for blend in BLENDS {
         let mut bundle = new_bundle(blend.base);
-        let files = |code: &str| BUILTIN.iter().find(|(c, _)| *c == code).map(|(_, f)| *f).unwrap_or(&[]);
-        for (name, source) in files(blend.base) {
+        for (name, source) in files_of(&sources, blend.base) {
             add_source(&mut bundle, blend.code, name, (*source).to_owned());
         }
-        for (name, source) in files(blend.hints) {
+        for (name, source) in files_of(&sources, blend.hints) {
             add_source(&mut bundle, blend.code, name, hint_messages(source));
         }
         add_source(&mut bundle, blend.code, "name", format!("language-name = {}\n", blend.name));
@@ -165,8 +188,16 @@ fn load_extra(bundles: &mut BTreeMap<String, FluentBundle<FluentResource>>, dir:
     }
 }
 
-/// Загружает переводы заново: встроенные и (если указана папка) пользовательские.
+/// Загружает переводы программы: строки платформы, встроенные переводы `sources` (программы
+/// и общих крейтов со своими строками) и пользовательские из папки `extra`.
 /// Выбранный язык сохраняется.
+pub fn init_with(sources: &[Locales], extra: Option<&Path>) {
+    *SOURCES.write().unwrap_or_else(|e| e.into_inner()) = sources.to_vec();
+    init(extra);
+}
+
+/// Загружает переводы заново: встроенные (платформы и переданные в [`init_with`]) и (если
+/// указана папка) пользовательские. Выбранный язык сохраняется.
 pub fn init(extra: Option<&Path>) {
     let mut state = STATE.write().unwrap_or_else(|e| e.into_inner());
     let current = std::mem::take(&mut state.current);
@@ -260,19 +291,19 @@ pub fn has_message(code: &str, key: &str) -> bool {
     state.bundles.get(code).is_some_and(|b| b.has_message(key))
 }
 
-/// Все ключи встроенного перевода — для проверки полноты.
+/// Все ключи встроенных переводов (платформы и программы) — для проверки полноты.
 pub fn builtin_message_ids(code: &str) -> Vec<String> {
+    message_ids(&sources(), code)
+}
+
+/// Ключи языка `code` в наборах переводов `sets` (повторы сохраняются — по ним видны дубли).
+pub fn message_ids(sets: &[Locales], code: &str) -> Vec<String> {
     let mut ids = Vec::new();
-    for (lang, files) in BUILTIN {
-        if *lang != code {
-            continue;
-        }
-        for (_, source) in *files {
-            let resource = FluentResource::try_new((*source).to_owned()).unwrap_or_else(|(r, _)| r);
-            for entry in resource.entries() {
-                if let fluent_syntax::ast::Entry::Message(m) = entry {
-                    ids.push(m.id.name.to_owned());
-                }
+    for (_, source) in files_of(sets, code) {
+        let resource = FluentResource::try_new((*source).to_owned()).unwrap_or_else(|(r, _)| r);
+        for entry in resource.entries() {
+            if let fluent_syntax::ast::Entry::Message(m) = entry {
+                ids.push(m.id.name.to_owned());
             }
         }
     }
@@ -282,7 +313,45 @@ pub fn builtin_message_ids(code: &str) -> Vec<String> {
 
 /// Коды встроенных языков.
 pub fn builtin_languages() -> Vec<&'static str> {
-    BUILTIN.iter().map(|(code, _)| *code).collect()
+    let mut codes: Vec<&'static str> = sources().iter().flat_map(|set| set.iter().map(|(code, _)| *code)).collect();
+    codes.sort();
+    codes.dedup();
+    codes
+}
+
+/// Ключи `t!("…")` в исходниках `.rs` папки `dir` (вместе с вложенными, кроме `target`):
+/// ключ и файл. Для проверок, что каждый ключ переведён.
+pub fn used_keys(dir: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    collect_keys(dir, &mut out);
+    out
+}
+
+fn collect_keys(dir: &Path, out: &mut Vec<(String, String)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        if path.is_dir() {
+            if name != "target" {
+                collect_keys(&path, out);
+            }
+        } else if name.ends_with(".rs") {
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let mut from = 0;
+            while let Some(i) = text[from..].find("t!(\"").map(|i| i + from) {
+                from = i + 4;
+                // `format!("…")` и подобные — не наш макрос.
+                let before = text[..i].chars().next_back();
+                if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                    continue;
+                }
+                if let Some(end) = text[from..].find('"') {
+                    out.push((text[from..from + end].to_owned(), path.display().to_string()));
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -294,7 +363,7 @@ mod tests {
 
     #[test]
     fn builtin_locales_parse_without_errors() {
-        for (code, files) in BUILTIN {
+        for (code, files) in PLATFORM {
             for (name, source) in *files {
                 if let Err((_, errors)) = FluentResource::try_new((*source).to_owned()) {
                     panic!("ошибки в {code}/{name}: {errors:?}");
@@ -311,10 +380,10 @@ mod tests {
 
     #[test]
     fn all_languages_have_the_same_keys() {
-        let reference = builtin_message_ids(FALLBACK);
+        let reference = message_ids(&[PLATFORM], FALLBACK);
         assert!(!reference.is_empty());
-        for code in builtin_languages() {
-            let ids = builtin_message_ids(code);
+        for (code, _) in PLATFORM {
+            let ids = message_ids(&[PLATFORM], code);
             let missing: Vec<_> = reference.iter().filter(|k| !ids.contains(k)).collect();
             let extra: Vec<_> = ids.iter().filter(|k| !reference.contains(k)).collect();
             assert!(missing.is_empty(), "в языке «{code}» не хватает строк: {missing:?}");
@@ -324,67 +393,46 @@ mod tests {
 
     #[test]
     fn duplicate_keys_are_not_allowed() {
-        for code in builtin_languages() {
-            let ids = builtin_message_ids(code);
+        for (code, _) in PLATFORM {
+            let ids = message_ids(&[PLATFORM], code);
             let mut seen = HashSet::new();
             let dups: Vec<_> = ids.iter().filter(|k| !seen.insert(k.as_str())).collect();
             assert!(dups.is_empty(), "в языке «{code}» повторяются ключи: {dups:?}");
         }
     }
 
-    /// Каждый ключ из `t!("…")` в исходниках всех крейтов должен быть в переводе.
+    /// Каждый ключ из `t!("…")` в крейтах платформы должен быть в строках платформы.
+    /// Крейты со своей папкой `locales` (например, оболочка) проверяют себя сами.
     #[test]
     fn every_used_key_exists() {
         let crates = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let mut used = Vec::new();
-        collect_keys(&crates, &mut used);
-        assert!(!used.is_empty(), "ключи t!(\"…\") не найдены — проверь сканер");
-        let ids = builtin_message_ids(FALLBACK);
-        let missing: Vec<_> = used.iter().filter(|(k, _)| !ids.contains(k)).collect();
-        assert!(missing.is_empty(), "ключи используются в коде, но не переведены: {missing:?}");
-    }
-
-    fn collect_keys(dir: &Path, out: &mut Vec<(String, String)>) {
-        let Ok(entries) = std::fs::read_dir(dir) else { return };
         let this_crate = std::path::absolute(env!("CARGO_MANIFEST_DIR")).unwrap_or_default();
-        for entry in entries.flatten() {
+        let mut used = Vec::new();
+        for entry in std::fs::read_dir(&crates).into_iter().flatten().flatten() {
             let path = entry.path();
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            if path.is_dir() {
-                // Сам крейт локализации пропускаем: в его документации ключи — только примеры.
-                let skip = name == "target" || std::path::absolute(&path).is_ok_and(|p| p == this_crate);
-                if !skip {
-                    collect_keys(&path, out);
-                }
-            } else if name.ends_with(".rs") {
-                let text = std::fs::read_to_string(&path).unwrap_or_default();
-                let mut from = 0;
-                while let Some(i) = text[from..].find("t!(\"").map(|i| i + from) {
-                    from = i + 4;
-                    // `format!("…")` и подобные — не наш макрос.
-                    let before = text[..i].chars().next_back();
-                    if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
-                        continue;
-                    }
-                    if let Some(end) = text[from..].find('"') {
-                        out.push((text[from..from + end].to_owned(), path.display().to_string()));
-                    }
-                }
+            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let own_strings = path.join("locales").is_dir();
+            // Сам крейт локализации пропускаем: в его документации ключи — только примеры.
+            let skip = std::path::absolute(&path).is_ok_and(|p| p == this_crate);
+            if name.starts_with("forma-") && !own_strings && !skip {
+                used.extend(used_keys(&path));
             }
         }
+        assert!(!used.is_empty(), "ключи t!(\"…\") не найдены — проверь сканер");
+        let ids = message_ids(&[PLATFORM], FALLBACK);
+        let missing: Vec<_> = used.iter().filter(|(k, _)| !ids.contains(k)).collect();
+        assert!(missing.is_empty(), "ключи используются в коде, но не переведены: {missing:?}");
     }
 
     #[test]
     fn russian_plurals() {
         let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_language("ru");
-        assert_eq!(t!("status-detached-windows", count = 1), "1 отдельное окно");
-        assert_eq!(t!("status-detached-windows", count = 3), "3 отдельных окна");
-        assert_eq!(t!("status-detached-windows", count = 5), "5 отдельных окон");
-        assert_eq!(t!("status-detached-windows", count = 21), "21 отдельное окно");
+        assert_eq!(t!("dock-more-tabs", count = 1), "Ещё 1 вкладка");
+        assert_eq!(t!("dock-more-tabs", count = 3), "Ещё 3 вкладки");
+        assert_eq!(t!("dock-more-tabs", count = 5), "Ещё 5 вкладок");
+        assert_eq!(t!("dock-more-tabs", count = 21), "Ещё 21 вкладка");
         set_language("en");
-        assert_eq!(t!("status-detached-windows", count = 1), "1 detached window");
-        assert_eq!(t!("status-detached-windows", count = 5), "5 detached windows");
     }
 
     #[test]
@@ -393,7 +441,6 @@ mod tests {
         assert!(languages().iter().any(|(code, name)| code == "en-RU" && name.contains("русские")));
         set_language("en-RU");
         // Интерфейс и термины — по-английски.
-        assert_eq!(tr("menu-file"), "File");
         assert_eq!(tr("settings-page-keymap"), "Keymap");
         // Подсказки — по-русски.
         set_language("ru");

@@ -163,15 +163,48 @@ pub fn color_of(name: &str, fallback: Color32) -> Color32 {
     overrides().read().ok().and_then(|s| s.colors.get(name).copied()).unwrap_or(fallback)
 }
 
-/// Есть ли значок с таким именем (встроенный или из темы).
-pub fn exists(name: &str) -> bool {
-    BUILTIN.iter().any(|(n, _)| *n == name) || overrides().read().is_ok_and(|s| s.files.contains_key(name))
+/// Значки программы: имя по смыслу и SVG, вшитый в программу.
+fn app_icons() -> &'static RwLock<Vec<(&'static str, &'static [u8])>> {
+    static APP: OnceLock<RwLock<Vec<(&'static str, &'static [u8])>>> = OnceLock::new();
+    APP.get_or_init(RwLock::default)
 }
 
-/// SVG значка: замена из темы или встроенный.
+/// Добавляет значки программы к значкам платформы (например, «note» и «graph» у заметок).
+/// Значок программы с тем же именем, что у платформы, заменяет его; тема по-прежнему может
+/// заменить любой из них. Вызывать при запуске, до первого кадра.
+pub fn register(icons: &'static [(&'static str, &'static [u8])]) {
+    let mut app = app_icons().write().unwrap_or_else(|e| e.into_inner());
+    for &(name, svg) in icons {
+        app.retain(|(n, _)| *n != name);
+        app.push((name, svg));
+    }
+    drop(app);
+    overrides().write().unwrap_or_else(|e| e.into_inner()).generation += 1;
+}
+
+/// Все значки и их рисунки: значки платформы (рисунок Lucide) и значки программы — для
+/// инспектора темы и шаблона новой темы.
+pub fn all_names() -> Vec<(&'static str, &'static str)> {
+    let app: Vec<(&'static str, &'static str)> = app_icons().read().map(|a| a.iter().map(|(n, _)| (*n, *n)).collect()).unwrap_or_default();
+    let mut out: Vec<(&'static str, &'static str)> = LUCIDE_NAMES.iter().copied().filter(|(n, _)| !app.iter().any(|(a, _)| a == n)).collect();
+    out.extend(app);
+    out
+}
+
+/// Есть ли значок с таким именем (встроенный, программы или из темы).
+pub fn exists(name: &str) -> bool {
+    BUILTIN.iter().any(|(n, _)| *n == name)
+        || app_icons().read().is_ok_and(|a| a.iter().any(|(n, _)| *n == name))
+        || overrides().read().is_ok_and(|s| s.files.contains_key(name))
+}
+
+/// SVG значка: замена из темы, значок программы или встроенный.
 fn source(name: &str) -> Option<Cow<'static, [u8]>> {
     if let Some(bytes) = overrides().read().ok().and_then(|s| s.files.get(name).cloned()) {
         return Some(Cow::Owned(bytes));
+    }
+    if let Some(svg) = app_icons().read().ok().and_then(|a| a.iter().find(|(n, _)| *n == name).map(|(_, b)| *b)) {
+        return Some(Cow::Borrowed(svg));
     }
     BUILTIN.iter().find(|(n, _)| *n == name).map(|(_, b)| Cow::Borrowed(*b))
 }

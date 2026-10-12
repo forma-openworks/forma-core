@@ -1,0 +1,34 @@
+[package]
+name = "forma-shell"
+description = "Платформа Forma: оболочка программы — шапка окна, меню, рабочие пространства, настройки, диалоги"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+forma-i18n.workspace = true
+forma-layout.workspace = true
+forma-ui.workspace = true
+forma-actions.workspace = true
+forma-settings.workspace = true
+forma-plugins.workspace = true
+eframe.workspace = true
+wgpu.workspace = true
+rfd.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+log.workspace = true
+env_logger.workspace = true
+# Фоновая картинка окна.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
+# Подсветка кода: около 170 языков из набора bat (через two-face), цвета — из темы.
+two-face = { version = "0.5", default-features = false, features = ["syntect-default-fancy"] }
+syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
+
+# Своя шапка окна: скругление углов окна без системной рамки в Windows 11.
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+
+[build-dependencies]
+forma-build.workspace = true

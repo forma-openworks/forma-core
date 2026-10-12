@@ -1,0 +1,9 @@
+[package]
+name = "forma-build"
+description = "Платформа Forma: помощники сборочных скриптов — переводы и ресурсы .exe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+embed-resource = "3.0.12"

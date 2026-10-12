@@ -11,3 +11,6 @@ unic-langid.workspace = true
 sys-locale.workspace = true
 log.workspace = true
 fluent-syntax.workspace = true
+
+[build-dependencies]
+forma-build.workspace = true

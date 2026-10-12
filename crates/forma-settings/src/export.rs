@@ -92,9 +92,12 @@ impl Archive {
     }
 }
 
-/// Имя файла по умолчанию: `Forma Mycelium settings 2026-10-11.zip`.
+/// Имя файла по умолчанию: `Forma Mycelium settings 2026-10-11.zip`. Знаки, которых не
+/// бывает в именах файлов Windows, убираются: «Forma: Holotype» → «Forma Holotype».
 pub fn default_file_name(app: &AppInfo, unix: u64) -> String {
-    format!("{} settings {}.zip", app.title, date_text(unix))
+    let title: String = app.title.chars().filter(|c| !matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')).collect();
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    format!("{title} settings {}.zip", date_text(unix))
 }
 
 /// Дата `2026-10-11` по времени Unix (UTC).
@@ -175,6 +178,8 @@ mod tests {
     #[test]
     fn file_name_has_date() {
         assert_eq!(default_file_name(&APP, 1_791_676_800), "Forma Test settings 2026-10-11.zip");
+        let colon = AppInfo { title: "Forma: Holotype", ..APP };
+        assert_eq!(default_file_name(&colon, 1_791_676_800), "Forma Holotype settings 2026-10-11.zip");
         assert_eq!(civil_date(0), (1970, 1, 1));
         assert_eq!(civil_date(951_782_400), (2000, 2, 29));
     }
