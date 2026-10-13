@@ -1,0 +1,47 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/forma-openworks/forma-core"
+
+[workspace.dependencies]
+forma-build = { path = "crates/forma-build" }
+forma-i18n = { path = "crates/forma-i18n" }
+forma-layout = { path = "crates/forma-layout" }
+forma-ui = { path = "crates/forma-ui" }
+forma-actions = { path = "crates/forma-actions" }
+forma-settings = { path = "crates/forma-settings" }
+forma-plugins = { path = "crates/forma-plugins" }
+forma-shell = { path = "crates/forma-shell" }
+
+eframe = { version = "0.36", default-features = false, features = [
+    "wgpu_no_default_features",
+    "default_fonts",
+    "accesskit",
+    "persistence",
+    "wayland",
+    "x11",
+] }
+egui = { version = "0.36", default-features = false }
+# Собираем только Vulkan-бэкенд: весь интерфейс рисуется через Vulkan.
+wgpu = { version = "30", default-features = false, features = ["std", "parking_lot", "wgsl", "vulkan"] }
+fluent-bundle = "0.16"
+fluent-syntax = "0.12"
+unic-langid = "0.9"
+sys-locale = "0.3"
+rfd = "0.17"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

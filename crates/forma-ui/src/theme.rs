@@ -24,6 +24,10 @@ use forma_layout::DockStyle;
 pub use file::{BackgroundSpec, Fit, FontsSpec, SyntaxSpec, ThemeFile, slug};
 pub use registry::{Origin, ThemeEntry, Themes};
 
+/// Темы Mycelium Dark и Light (тёмная первая). Они общие для программ платформы: любую
+/// программу Forma можно одеть одинаково, а свои темы программ наследуют от них (`extends`).
+pub const MYCELIUM_THEMES: [&str; 2] = [include_str!("../themes/mycelium-dark.toml"), include_str!("../themes/mycelium-light.toml")];
+
 /// Ключ темы: имя в файле, значение по умолчанию и описание (для шаблона новой темы).
 #[derive(Clone, Copy, Debug)]
 pub struct TokenInfo {
