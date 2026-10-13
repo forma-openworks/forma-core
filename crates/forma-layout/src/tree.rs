@@ -1,6 +1,6 @@
-//! Дерево разбиений одного окна: области с вкладками, разделённые по горизонтали
-//! или вертикали, как экран в Blender. Здесь только данные и операции над ними —
-//! без отрисовки, чтобы всё можно было проверить тестами.
+//! Дерево разбиений одного окна: области, разделённые по горизонтали или вертикали, как
+//! экран в Blender. В каждой области — один редактор. Здесь только данные и операции над
+//! ними — без отрисовки, чтобы всё можно было проверить тестами.
 
 use serde::{Deserialize, Serialize};
 
@@ -11,36 +11,71 @@ pub struct AreaId(pub u64);
 /// Направление разбиения.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SplitDir {
-    /// Дети стоят рядом: левый и правый.
+    /// Дети стоят рядом: левый и правый (граница между ними вертикальная).
     Horizontal,
-    /// Дети друг над другом: верхний и нижний.
+    /// Дети друг над другом: верхний и нижний (граница горизонтальная).
     Vertical,
 }
 
-/// Область: набор вкладок, одна из которых показана.
+impl SplitDir {
+    pub fn flip(self) -> Self {
+        match self {
+            SplitDir::Horizontal => SplitDir::Vertical,
+            SplitDir::Vertical => SplitDir::Horizontal,
+        }
+    }
+}
+
+/// Область: один редактор.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "AreaRepr<T>", bound(serialize = "T: Serialize", deserialize = "T: Deserialize<'de>"))]
 pub struct Area<T> {
     pub id: AreaId,
-    pub tabs: Vec<T>,
-    pub active: usize,
+    pub editor: T,
+}
+
+/// Как область лежит в файле раскладки — нынешняя и прежняя, с вкладками.
+#[derive(Deserialize)]
+#[serde(untagged, bound(deserialize = "T: Deserialize<'de>"))]
+enum AreaRepr<T> {
+    Current {
+        id: AreaId,
+        editor: T,
+    },
+    /// Раскладки до областей в духе Blender: вкладки, из которых видна одна.
+    Tabs {
+        id: AreaId,
+        tabs: Vec<T>,
+        #[serde(default)]
+        active: usize,
+    },
+}
+
+impl<T> TryFrom<AreaRepr<T>> for Area<T> {
+    type Error = String;
+
+    fn try_from(r: AreaRepr<T>) -> Result<Self, String> {
+        match r {
+            AreaRepr::Current { id, editor } => Ok(Area { id, editor }),
+            AreaRepr::Tabs { id, mut tabs, active } => {
+                if tabs.is_empty() {
+                    return Err("область без вкладок".into());
+                }
+                let i = active.min(tabs.len() - 1);
+                Ok(Area { id, editor: tabs.swap_remove(i) })
+            }
+        }
+    }
 }
 
 impl<T> Area<T> {
-    pub fn new(id: AreaId, tabs: Vec<T>) -> Self {
-        Self { id, tabs, active: 0 }
-    }
-
-    pub fn active_tab(&self) -> Option<&T> {
-        self.tabs.get(self.active.min(self.tabs.len().saturating_sub(1)))
-    }
-
-    /// Держит номер активной вкладки в допустимых пределах.
-    pub fn clamp_active(&mut self) {
-        self.active = self.active.min(self.tabs.len().saturating_sub(1));
+    pub fn new(id: AreaId, editor: T) -> Self {
+        Self { id, editor }
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound(serialize = "T: Serialize", deserialize = "T: Deserialize<'de>"))]
 pub enum Node<T> {
     Area(Area<T>),
     Split {
@@ -51,13 +86,46 @@ pub enum Node<T> {
     },
 }
 
+/// Куда относительно области: середина или один из краёв.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Zone {
+    Center,
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl Zone {
+    /// Разбиение, которое создаёт эта зона: направление и «новая область идёт первой».
+    pub fn split(self) -> Option<(SplitDir, bool)> {
+        match self {
+            Zone::Left => Some((SplitDir::Horizontal, true)),
+            Zone::Right => Some((SplitDir::Horizontal, false)),
+            Zone::Top => Some((SplitDir::Vertical, true)),
+            Zone::Bottom => Some((SplitDir::Vertical, false)),
+            Zone::Center => None,
+        }
+    }
+
+    pub fn opposite(self) -> Zone {
+        match self {
+            Zone::Left => Zone::Right,
+            Zone::Right => Zone::Left,
+            Zone::Top => Zone::Bottom,
+            Zone::Bottom => Zone::Top,
+            Zone::Center => Zone::Center,
+        }
+    }
+}
+
 impl<T> Node<T> {
     pub fn split(dir: SplitDir, ratio: f32, first: Node<T>, second: Node<T>) -> Self {
         Node::Split { dir, ratio, children: Box::new([first, second]) }
     }
 
-    pub fn area(id: AreaId, tabs: Vec<T>) -> Self {
-        Node::Area(Area::new(id, tabs))
+    pub fn area(id: AreaId, editor: T) -> Self {
+        Node::Area(Area::new(id, editor))
     }
 
     /// Первая (верхняя левая) область поддерева.
@@ -88,6 +156,17 @@ impl<T> Node<T> {
         }
     }
 
+    fn visit_mut<'a>(&'a mut self, out: &mut Vec<&'a mut Area<T>>) {
+        match self {
+            Node::Area(a) => out.push(a),
+            Node::Split { children, .. } => {
+                let [a, b] = &mut **children;
+                a.visit_mut(out);
+                b.visit_mut(out);
+            }
+        }
+    }
+
     fn for_each_mut(&mut self, f: &mut impl FnMut(&mut Area<T>)) {
         match self {
             Node::Area(a) => f(a),
@@ -96,6 +175,36 @@ impl<T> Node<T> {
                 children[1].for_each_mut(f);
             }
         }
+    }
+
+    /// Соседи-области: пары (область, её сосед по разбиению и где он стоит), если оба ребёнка
+    /// разбиения — области. Только такие соседи объединяются, как в Blender.
+    fn siblings(&self, out: &mut Vec<(AreaId, AreaId, Zone)>) {
+        if let Node::Split { dir, children, .. } = self {
+            if let (Node::Area(a), Node::Area(b)) = (&children[0], &children[1]) {
+                let (after, before) = match dir {
+                    SplitDir::Horizontal => (Zone::Right, Zone::Left),
+                    SplitDir::Vertical => (Zone::Bottom, Zone::Top),
+                };
+                out.push((a.id, b.id, after));
+                out.push((b.id, a.id, before));
+            }
+            children[0].siblings(out);
+            children[1].siblings(out);
+        }
+    }
+
+    fn split_mut(&mut self, first: AreaId, second: AreaId) -> Option<&mut Node<T>> {
+        let here = match self {
+            Node::Area(_) => return None,
+            Node::Split { children, .. } => children[0].first_area().id == first && children[1].first_area().id == second,
+        };
+        if here {
+            return Some(self);
+        }
+        let Node::Split { children, .. } = self else { return None };
+        let [a, b] = &mut **children;
+        a.split_mut(first, second).or_else(|| b.split_mut(first, second))
     }
 }
 
@@ -133,34 +242,27 @@ fn replace_area<T, F: FnOnce(Area<T>) -> Node<T>>(node: Node<T>, id: AreaId, f: 
     }
 }
 
-/// Куда положить вкладку относительно области.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Zone {
-    /// Ещё одной вкладкой в конец.
-    Center,
-    Left,
-    Right,
-    Top,
-    Bottom,
-    /// В строку вкладок перед вкладкой с этим номером.
-    Tab(usize),
-}
-
-impl Zone {
-    /// Разбиение, которое создаёт эта зона: направление и «новая область идёт первой».
-    pub fn split(self) -> Option<(SplitDir, bool)> {
-        match self {
-            Zone::Left => Some((SplitDir::Horizontal, true)),
-            Zone::Right => Some((SplitDir::Horizontal, false)),
-            Zone::Top => Some((SplitDir::Vertical, true)),
-            Zone::Bottom => Some((SplitDir::Vertical, false)),
-            Zone::Center | Zone::Tab(_) => None,
+/// Объединяет соседей `keep` и `remove`: их разбиение становится областью `keep`.
+fn join<T>(node: Node<T>, keep: AreaId, remove: AreaId, out: &mut Option<T>) -> Node<T> {
+    match node {
+        Node::Split { dir, ratio, children } => {
+            let [a, b] = *children;
+            match (a, b) {
+                (Node::Area(x), Node::Area(y)) if (x.id == keep && y.id == remove) || (x.id == remove && y.id == keep) => {
+                    let (kept, gone) = if x.id == keep { (x, y) } else { (y, x) };
+                    *out = Some(gone.editor);
+                    Node::Area(kept)
+                }
+                (a, b) => Node::split(dir, ratio, join(a, keep, remove, out), join(b, keep, remove, out)),
+            }
         }
+        n => n,
     }
 }
 
 /// Содержимое одного окна: дерево областей (или пусто) и развёрнутая область.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(bound(serialize = "T: Serialize", deserialize = "T: Deserialize<'de>"))]
 pub struct Surface<T> {
     pub root: Option<Node<T>>,
     #[serde(default)]
@@ -186,6 +288,10 @@ impl<T> Surface<T> {
         out
     }
 
+    pub fn editors(&self) -> impl Iterator<Item = &T> {
+        self.areas().into_iter().map(|a| &a.editor)
+    }
+
     pub fn area(&self, id: AreaId) -> Option<&Area<T>> {
         self.areas().into_iter().find(|a| a.id == id)
     }
@@ -202,8 +308,8 @@ impl<T> Surface<T> {
         self.root.is_none()
     }
 
-    pub fn tab_count(&self) -> usize {
-        self.areas().iter().map(|a| a.tabs.len()).sum()
+    pub fn count(&self) -> usize {
+        self.areas().len()
     }
 
     pub fn first_area_id(&self) -> Option<AreaId> {
@@ -216,7 +322,21 @@ impl<T> Surface<T> {
         }
     }
 
-    /// Убирает область целиком и возвращает её.
+    /// Соседи, которые можно объединить: (область, сосед, где стоит сосед).
+    pub fn siblings(&self) -> Vec<(AreaId, AreaId, Zone)> {
+        let mut out = Vec::new();
+        if let Some(root) = &self.root {
+            root.siblings(&mut out);
+        }
+        out
+    }
+
+    /// Где стоит сосед `other` относительно `id`, если их можно объединить.
+    pub fn sibling_side(&self, id: AreaId, other: AreaId) -> Option<Zone> {
+        self.siblings().into_iter().find(|(a, b, _)| *a == id && *b == other).map(|(_, _, z)| z)
+    }
+
+    /// Убирает область целиком и возвращает её; сосед занимает её место.
     pub fn remove_area(&mut self, id: AreaId) -> Option<Area<T>> {
         let mut out = None;
         self.root = self.root.take().and_then(|r| remove_area(r, id, &mut out));
@@ -226,79 +346,92 @@ impl<T> Surface<T> {
         out
     }
 
-    /// Вынимает вкладку. Опустевшая область исчезает, соседняя занимает её место.
-    pub fn remove_tab(&mut self, id: AreaId, index: usize) -> Option<T> {
-        let area = self.area_mut(id)?;
-        if index >= area.tabs.len() {
-            return None;
+    /// Делит область `target`: новая область `area` встаёт с края `zone` и занимает `ratio`
+    /// (долю) от прежней. Для середины ничего не делает и возвращает `area` обратно.
+    pub fn split_area(&mut self, target: AreaId, zone: Zone, area: Area<T>, ratio: f32) -> Result<(), Area<T>> {
+        let Some((dir, new_first)) = zone.split() else { return Err(area) };
+        if !self.contains(target) {
+            return Err(area);
         }
-        let tab = area.tabs.remove(index);
-        if index < area.active || area.active >= area.tabs.len() {
-            area.active = area.active.saturating_sub(1);
+        let ratio = if new_first { ratio } else { 1.0 - ratio }.clamp(0.05, 0.95);
+        let mut f = Some(move |old: Area<T>| {
+            if new_first { Node::split(dir, ratio, Node::Area(area), Node::Area(old)) } else { Node::split(dir, ratio, Node::Area(old), Node::Area(area)) }
+        });
+        self.root = self.root.take().map(|r| replace_area(r, target, &mut f));
+        if self.maximized == Some(target) {
+            self.maximized = None;
         }
-        area.clamp_active();
-        if area.tabs.is_empty() {
-            self.remove_area(id);
-        }
-        Some(tab)
+        Ok(())
     }
 
-    /// Кладёт вкладку в область `target`. Для краевых зон область делится пополам,
-    /// и вкладка попадает в новую область с номером `new_id`.
-    /// Если такой области нет, вкладка добавляется как в [`Self::add_tab`].
-    pub fn insert(&mut self, target: AreaId, zone: Zone, tab: T, new_id: AreaId) {
-        if !self.contains(target) {
-            self.add_tab(tab, None, new_id);
-            return;
+    /// Меняет редактор области; возвращает прежний.
+    pub fn replace_editor(&mut self, target: AreaId, editor: T) -> Result<T, T> {
+        match self.area_mut(target) {
+            Some(a) => Ok(std::mem::replace(&mut a.editor, editor)),
+            None => Err(editor),
         }
-        match zone.split() {
-            Some((dir, new_first)) => {
-                let new_area = Node::area(new_id, vec![tab]);
-                let mut f = Some(move |old: Area<T>| {
-                    if new_first {
-                        Node::split(dir, 0.5, new_area, Node::Area(old))
-                    } else {
-                        Node::split(dir, 0.5, Node::Area(old), new_area)
+    }
+
+    /// Объединяет соседние области: `keep` занимает место `remove`. Возвращает редактор убранной.
+    pub fn join(&mut self, keep: AreaId, remove: AreaId) -> Option<T> {
+        self.sibling_side(keep, remove)?;
+        let mut out = None;
+        self.root = self.root.take().map(|r| join(r, keep, remove, &mut out));
+        if self.maximized == Some(remove) {
+            self.maximized = None;
+        }
+        out
+    }
+
+    /// Меняет местами редакторы двух областей.
+    pub fn swap_editors(&mut self, a: AreaId, b: AreaId) -> bool {
+        if a == b {
+            return false;
+        }
+        let Some(root) = &mut self.root else { return false };
+        let mut all = Vec::new();
+        root.visit_mut(&mut all);
+        let mut pair = all.into_iter().filter(|x| x.id == a || x.id == b);
+        match (pair.next(), pair.next()) {
+            (Some(x), Some(y)) => {
+                std::mem::swap(&mut x.editor, &mut y.editor);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Меняет местами половины разбиения, первая половина которого начинается с области
+    /// `first`, а вторая — с `second` (меню границы «Поменять местами»).
+    pub fn swap_split(&mut self, first: AreaId, second: AreaId) -> bool {
+        match self.root.as_mut().and_then(|r| r.split_mut(first, second)) {
+            Some(Node::Split { ratio, children, .. }) => {
+                children.swap(0, 1);
+                *ratio = 1.0 - *ratio;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Все редакторы окна по порядку (окно при этом пустеет).
+    pub fn take_all(&mut self) -> Vec<T> {
+        let mut out = Vec::new();
+        if let Some(root) = self.root.take() {
+            fn collect<T>(node: Node<T>, out: &mut Vec<T>) {
+                match node {
+                    Node::Area(a) => out.push(a.editor),
+                    Node::Split { children, .. } => {
+                        let [a, b] = *children;
+                        collect(a, out);
+                        collect(b, out);
                     }
-                });
-                self.root = self.root.take().map(|r| replace_area(r, target, &mut f));
-                if self.maximized == Some(target) {
-                    self.maximized = None;
                 }
             }
-            None => {
-                let area = self.area_mut(target).expect("область проверена выше");
-                let index = match zone {
-                    Zone::Tab(i) => i.min(area.tabs.len()),
-                    _ => area.tabs.len(),
-                };
-                area.tabs.insert(index, tab);
-                area.active = index;
-            }
+            collect(root, &mut out);
         }
-    }
-
-    /// Добавляет вкладку в область `prefer` (если она есть), иначе в первую область,
-    /// а в пустое окно — новой областью с номером `new_id`.
-    pub fn add_tab(&mut self, tab: T, prefer: Option<AreaId>, new_id: AreaId) {
-        let target = prefer.filter(|id| self.contains(*id)).or_else(|| self.first_area_id());
-        match target {
-            Some(id) => {
-                let area = self.area_mut(id).expect("область существует");
-                area.tabs.push(tab);
-                area.active = area.tabs.len() - 1;
-            }
-            None => self.root = Some(Node::area(new_id, vec![tab])),
-        }
-    }
-
-    /// Все вкладки окна по порядку (окно при этом пустеет).
-    pub fn take_all_tabs(&mut self) -> Vec<T> {
-        let mut tabs = Vec::new();
-        self.for_each_area_mut(|a| tabs.append(&mut a.tabs));
-        self.root = None;
         self.maximized = None;
-        tabs
+        out
     }
 
     /// Самый большой номер области — чтобы после загрузки выдавать новые без повторов.
@@ -320,18 +453,8 @@ impl<T> Surface<T> {
         self.maximized = new_max;
     }
 
-    /// Чинит то, что могло сломаться в файле раскладки: пустые области, неверные доли.
+    /// Чинит то, что могло сломаться в файле раскладки: неверные доли, пропавшую развёрнутую область.
     pub fn sanitize(&mut self) {
-        let mut empty = Vec::new();
-        self.for_each_area_mut(|a| {
-            a.clamp_active();
-            if a.tabs.is_empty() {
-                empty.push(a.id);
-            }
-        });
-        for id in empty {
-            self.remove_area(id);
-        }
         fn fix<T>(node: &mut Node<T>) {
             if let Node::Split { ratio, children, .. } = node {
                 if !ratio.is_finite() {
@@ -345,10 +468,10 @@ impl<T> Surface<T> {
         if let Some(root) = &mut self.root {
             fix(root);
         }
-        if let Some(id) = self.maximized {
-            if !self.contains(id) {
-                self.maximized = None;
-            }
+        if let Some(id) = self.maximized
+            && !self.contains(id)
+        {
+            self.maximized = None;
         }
     }
 }
@@ -357,105 +480,103 @@ impl<T> Surface<T> {
 mod tests {
     use super::*;
 
-    fn ids(s: &Surface<&'static str>) -> Vec<(u64, Vec<&'static str>)> {
-        s.areas().iter().map(|a| (a.id.0, a.tabs.clone())).collect()
+    fn ids(s: &Surface<&'static str>) -> Vec<(u64, &'static str)> {
+        s.areas().iter().map(|a| (a.id.0, a.editor)).collect()
     }
 
     fn two_areas() -> Surface<&'static str> {
-        Surface::new(Node::split(
-            SplitDir::Horizontal,
-            0.3,
-            Node::area(AreaId(1), vec!["проект"]),
-            Node::area(AreaId(2), vec!["код", "консоль"]),
-        ))
+        Surface::new(Node::split(SplitDir::Horizontal, 0.3, Node::area(AreaId(1), "проект"), Node::area(AreaId(2), "код")))
     }
 
     #[test]
-    fn removing_last_tab_collapses_split() {
+    fn removing_area_collapses_split() {
         let mut s = two_areas();
-        assert_eq!(s.remove_tab(AreaId(1), 0), Some("проект"));
+        assert_eq!(s.remove_area(AreaId(1)).map(|a| a.editor), Some("проект"));
         assert!(matches!(s.root, Some(Node::Area(_))), "разбиение схлопнулось");
-        assert_eq!(ids(&s), vec![(2, vec!["код", "консоль"])]);
-        assert_eq!(s.remove_tab(AreaId(2), 1), Some("консоль"));
-        assert_eq!(s.remove_tab(AreaId(2), 0), Some("код"));
+        assert_eq!(ids(&s), vec![(2, "код")]);
+        s.remove_area(AreaId(2));
         assert!(s.is_empty());
     }
 
     #[test]
-    fn insert_into_edge_splits_area() {
+    fn split_area_puts_new_area_on_the_side() {
         let mut s = two_areas();
-        s.insert(AreaId(2), Zone::Bottom, "исключения", AreaId(3));
-        assert_eq!(ids(&s), vec![(1, vec!["проект"]), (2, vec!["код", "консоль"]), (3, vec!["исключения"])]);
+        s.split_area(AreaId(2), Zone::Bottom, Area::new(AreaId(3), "консоль"), 0.3).unwrap();
+        assert_eq!(ids(&s), vec![(1, "проект"), (2, "код"), (3, "консоль")]);
         let Some(Node::Split { children, .. }) = &s.root else { panic!() };
-        assert!(matches!(&children[1], Node::Split { dir: SplitDir::Vertical, .. }));
-
-        s.insert(AreaId(1), Zone::Left, "карта", AreaId(4));
+        let Node::Split { dir, ratio, .. } = &children[1] else { panic!() };
+        assert_eq!(*dir, SplitDir::Vertical);
+        assert!((ratio - 0.7).abs() < 1e-6, "новая область снизу занимает 30%");
+        s.split_area(AreaId(1), Zone::Left, Area::new(AreaId(4), "карта"), 0.5).unwrap();
         assert_eq!(s.areas()[0].id, AreaId(4), "новая область слева идёт первой");
+        assert!(s.split_area(AreaId(1), Zone::Center, Area::new(AreaId(5), "x"), 0.5).is_err());
+        assert!(s.split_area(AreaId(99), Zone::Left, Area::new(AreaId(5), "x"), 0.5).is_err());
     }
 
     #[test]
-    fn insert_into_tab_bar_keeps_order() {
+    fn join_only_neighbours() {
         let mut s = two_areas();
-        s.insert(AreaId(2), Zone::Tab(1), "карта", AreaId(9));
-        assert_eq!(ids(&s)[1], (2, vec!["код", "карта", "консоль"]));
-        assert_eq!(s.area(AreaId(2)).unwrap().active, 1, "вставленная вкладка становится активной");
-        s.insert(AreaId(2), Zone::Tab(99), "конец", AreaId(9));
-        assert_eq!(s.area(AreaId(2)).unwrap().tabs.last(), Some(&"конец"));
+        s.split_area(AreaId(2), Zone::Bottom, Area::new(AreaId(3), "консоль"), 0.3).unwrap();
+        assert_eq!(s.sibling_side(AreaId(2), AreaId(3)), Some(Zone::Bottom));
+        assert_eq!(s.sibling_side(AreaId(1), AreaId(2)), None, "у проекта сосед — целое разбиение");
+        assert_eq!(s.join(AreaId(1), AreaId(2)), None);
+        assert_eq!(s.join(AreaId(3), AreaId(2)), Some("код"));
+        assert_eq!(ids(&s), vec![(1, "проект"), (3, "консоль")]);
+        assert_eq!(s.sibling_side(AreaId(1), AreaId(3)), Some(Zone::Right));
     }
 
     #[test]
-    fn active_tab_stays_valid_after_removal() {
-        let mut s = Surface::new(Node::area(AreaId(1), vec!["a", "b", "c"]));
-        s.area_mut(AreaId(1)).unwrap().active = 2;
-        s.remove_tab(AreaId(1), 2);
-        assert_eq!(s.area(AreaId(1)).unwrap().active, 1);
-        s.area_mut(AreaId(1)).unwrap().active = 1;
-        s.remove_tab(AreaId(1), 0);
-        assert_eq!(s.area(AreaId(1)).unwrap().active_tab(), Some(&"b"), "показана та же вкладка");
-    }
-
-    #[test]
-    fn add_tab_prefers_given_area_and_fills_empty_surface() {
-        let mut s = Surface::default();
-        s.add_tab("код", Some(AreaId(5)), AreaId(7));
-        assert_eq!(ids(&s), vec![(7, vec!["код"])]);
+    fn swaps() {
         let mut s = two_areas();
-        s.add_tab("карта", Some(AreaId(2)), AreaId(8));
-        assert_eq!(ids(&s)[1].1, vec!["код", "консоль", "карта"]);
-        s.add_tab("ещё", Some(AreaId(42)), AreaId(8));
-        assert_eq!(ids(&s)[0].1, vec!["проект", "ещё"], "нет такой области — в первую");
+        assert!(s.swap_editors(AreaId(1), AreaId(2)));
+        assert_eq!(ids(&s), vec![(1, "код"), (2, "проект")]);
+        assert!(s.swap_split(AreaId(1), AreaId(2)));
+        assert_eq!(ids(&s), vec![(2, "проект"), (1, "код")]);
+        let Some(Node::Split { ratio, .. }) = &s.root else { panic!() };
+        assert!((ratio - 0.7).abs() < 1e-6, "размеры половин сохранились");
+    }
+
+    #[test]
+    fn replace_and_take_all() {
+        let mut s = two_areas();
+        assert_eq!(s.replace_editor(AreaId(2), "консоль"), Ok("код"));
+        assert_eq!(s.take_all(), vec!["проект", "консоль"]);
+        assert!(s.is_empty());
     }
 
     #[test]
     fn maximized_is_cleared_with_its_area() {
         let mut s = two_areas();
         s.maximized = Some(AreaId(1));
-        s.remove_tab(AreaId(1), 0);
+        s.remove_area(AreaId(1));
         assert_eq!(s.maximized, None);
     }
 
     #[test]
     fn sanitize_fixes_broken_layout() {
-        let mut s: Surface<&str> = Surface::new(Node::split(
-            SplitDir::Vertical,
-            f32::NAN,
-            Node::area(AreaId(1), vec![]),
-            Node::area(AreaId(2), vec!["код"]),
-        ));
+        let mut s: Surface<&str> = Surface::new(Node::split(SplitDir::Vertical, f32::NAN, Node::area(AreaId(1), "a"), Node::area(AreaId(2), "b")));
         s.maximized = Some(AreaId(77));
         s.sanitize();
-        assert_eq!(ids(&s), vec![(2, vec!["код"])]);
+        let Some(Node::Split { ratio, .. }) = &s.root else { panic!() };
+        assert_eq!(*ratio, 0.5);
         assert_eq!(s.maximized, None);
     }
 
     #[test]
-    fn layout_roundtrips_through_json() {
+    fn layout_roundtrips_and_reads_old_tabs() {
         let mut s = two_areas();
         s.maximized = Some(AreaId(2));
         let json = serde_json::to_string(&s).unwrap();
         let back: Surface<String> = serde_json::from_str(&json).unwrap();
         assert_eq!(back.areas().len(), 2);
         assert_eq!(back.maximized, Some(AreaId(2)));
+
+        // Раскладка до областей в духе Blender: видна была вторая вкладка.
+        let old = r#"{"root":{"Area":{"id":1,"tabs":["код","консоль"],"active":1}},"maximized":null}"#;
+        let back: Surface<String> = serde_json::from_str(old).unwrap();
+        assert_eq!(back.areas()[0].editor, "консоль");
+        let broken = r#"{"root":{"Area":{"id":1,"tabs":[],"active":0}}}"#;
+        assert!(serde_json::from_str::<Surface<String>>(broken).is_err());
     }
 
     #[test]

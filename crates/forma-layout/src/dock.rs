@@ -1,17 +1,20 @@
-//! Отрисовка составного интерфейса: области с вкладками, разделители, перетаскивание
-//! вкладок между областями и окнами, отдельные окна ОС.
+//! Отрисовка составного интерфейса в духе Blender: области с одним редактором, разделители,
+//! меню вида редактора в заголовке, жесты за уголки области (разделить, объединить, поменять
+//! местами, перенести), меню границ и заголовков, отдельные окна ОС.
 //!
-//! Перетаскивание работает в общих экранных координатах: каждое окно запоминает, где на
-//! экране лежат его области, а цель броска вычисляется в [`DockState::finish`] после того,
-//! как нарисованы все окна. Пока кнопка мыши зажата, Windows присылает координаты курсора
-//! окну-источнику даже за его пределами, поэтому вкладку можно бросить в другое окно
-//! или просто на рабочий стол — тогда она становится отдельным окном.
+//! Перенос области за заголовок работает в общих экранных координатах: каждое окно запоминает,
+//! где на экране лежат его области, а цель броска вычисляется в [`DockState::finish`] после
+//! того, как нарисованы все окна. Пока кнопка мыши зажата, Windows присылает координаты курсора
+//! окну-источнику даже за его пределами, поэтому область можно бросить в другое окно или просто
+//! на рабочий стол — тогда она становится отдельным окном.
+//!
+//! Жесты за уголки и разделение из меню работают внутри одного окна.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use egui::{
-    Align2, Color32, Context, CornerRadius, CursorIcon, FontId, Frame, Id, KeyboardShortcut, Pos2, Rect,
+    Align2, Color32, Context, CornerRadius, CursorIcon, FontId, Frame, Id, Key, KeyboardShortcut, Modifiers, Pos2, Rect,
     Sense, Stroke, StrokeKind, Ui, UiBuilder, Vec2, ViewportBuilder, ViewportId, pos2, vec2,
 };
 use forma_i18n::t;
@@ -19,47 +22,102 @@ use serde::{Deserialize, Serialize};
 
 use crate::tree::{Area, AreaId, Node, SplitDir, Surface, Zone};
 
-/// Высота строки вкладок.
+/// Высота заголовка области.
 const HEADER_H: f32 = 30.0;
 /// Зазор между областями (и от краёв окна).
 const GAP: f32 = 4.0;
 /// Скругление углов области.
 const RADIUS: u8 = 8;
-/// Меньше этого область не сжимается разделителем.
+/// Меньше этого область не сжимается разделителем и не делится.
 const MIN_AREA: f32 = 72.0;
 /// Размер нового отдельного окна, если размер исходной области неизвестен.
 const DEFAULT_WINDOW: Vec2 = vec2(720.0, 480.0);
-/// Уже этого вкладка не сжимается: лишние вкладки уходят в меню «»».
-const MIN_TAB: f32 = 76.0;
-/// Уже этого область прячет кнопку «+» в меню области.
-const ADD_BUTTON_MIN_W: f32 = 150.0;
+/// Сторона уголка, за который тянут жесты.
+const CORNER: f32 = 12.0;
+/// На сколько надо отвести мышь от уголка внутрь области, чтобы выбрать направление разреза.
+const CORNER_THRESHOLD: f32 = 10.0;
 
-/// Что приложение рассказывает о своих вкладках и как рисует их содержимое.
-pub trait TabViewer {
-    type Tab;
+/// Куда поставить новый редактор (см. [`DockState::open_editor`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Place {
+    /// Какую область делить; `None` (или такой области нет) — самую большую.
+    pub near: Option<AreaId>,
+    /// С какого края встанет новая область; `None` — вдоль длинной стороны, справа или снизу.
+    pub side: Option<Zone>,
+    /// Доля новой области.
+    pub share: f32,
+}
 
-    /// Подпись вкладки.
-    fn title(&mut self, tab: &Self::Tab) -> String;
+impl Default for Place {
+    fn default() -> Self {
+        Self { near: None, side: None, share: 0.5 }
+    }
+}
 
-    /// Значок перед подписью — его имя (см. [`DockStyle::paint_icon`]) — и цвет.
-    fn icon(&mut self, _tab: &Self::Tab) -> Option<(String, Color32)> {
+/// Вид редактора в меню выбора.
+#[derive(Clone, Debug)]
+pub struct EditorKind {
+    pub id: String,
+    pub title: String,
+    /// Имя значка (см. [`DockStyle::paint_icon`]).
+    pub icon: String,
+    /// Подпись сочетания клавиш; пусто — сочетания нет.
+    pub shortcut: String,
+}
+
+/// Столбец меню выбора вида: группа редакторов, как «Общие» или «Анимация» в Blender.
+#[derive(Clone, Debug)]
+pub struct KindGroup {
+    pub title: String,
+    pub kinds: Vec<EditorKind>,
+}
+
+/// Что приложение рассказывает о своих редакторах и как их рисует.
+pub trait EditorViewer {
+    type Editor;
+
+    /// Виды редакторов по группам — столбцы меню выбора вида.
+    fn kinds(&mut self) -> Vec<KindGroup>;
+
+    /// Вид редактора (`id` из [`Self::kinds`]).
+    fn kind(&mut self, editor: &Self::Editor) -> String;
+
+    /// Новый редактор вида `kind`.
+    fn create(&mut self, kind: &str) -> Option<Self::Editor>;
+
+    /// Меняет вид редактора области. По умолчанию — новый редактор вместо прежнего.
+    fn switch(&mut self, editor: &mut Self::Editor, kind: &str) {
+        if let Some(new) = self.create(kind) {
+            let old = std::mem::replace(editor, new);
+            self.on_close(old);
+        }
+    }
+
+    /// Подпись редактора: в заголовке отдельного окна и у курсора при переносе.
+    fn title(&mut self, editor: &Self::Editor) -> String;
+
+    /// Значок вида редактора — его имя (см. [`DockStyle::paint_icon`]) — и цвет.
+    fn icon(&mut self, _editor: &Self::Editor) -> Option<(String, Color32)> {
         None
     }
 
-    /// Постоянный идентификатор вкладки (не меняется при переносе между областями).
-    fn id(&mut self, tab: &Self::Tab) -> Id;
+    /// Постоянный идентификатор редактора (не меняется при переносе между областями).
+    fn id(&mut self, editor: &Self::Editor) -> Id;
 
-    /// Содержимое вкладки.
-    fn ui(&mut self, ui: &mut Ui, tab: &mut Self::Tab);
+    /// Заголовок области правее меню вида. По умолчанию — подпись редактора.
+    fn header(&mut self, ui: &mut Ui, editor: &mut Self::Editor) {
+        let title = self.title(editor);
+        ui.label(egui::RichText::new(title).size(13.0));
+    }
 
-    /// Пункты меню «+»: какую вкладку добавить в область.
-    fn add_menu(&mut self, ui: &mut Ui) -> Option<Self::Tab>;
+    /// Содержимое области.
+    fn ui(&mut self, ui: &mut Ui, editor: &mut Self::Editor);
 
-    /// Копия вкладки того же вида — для разделения области.
-    fn duplicate(&mut self, tab: &Self::Tab) -> Self::Tab;
+    /// Копия редактора — для разделения области и копии в новом окне.
+    fn duplicate(&mut self, editor: &Self::Editor) -> Self::Editor;
 
-    /// Вкладку закрыли.
-    fn on_close(&mut self, _tab: Self::Tab) {}
+    /// Редактор закрыли (область закрыта, объединена с соседней или заменена).
+    fn on_close(&mut self, _editor: Self::Editor) {}
 
     /// Начало кадра отдельного окна ОС: у него свой ввод, и общие сочетания клавиш
     /// программа ловит здесь (в главном окне она делает это сама).
@@ -73,7 +131,7 @@ pub struct DockStyle {
     pub gap_bg: Color32,
     /// Фон содержимого области.
     pub area_bg: Color32,
-    /// Фон строки вкладок.
+    /// Фон заголовка области.
     pub header_bg: Color32,
     pub hover_bg: Color32,
     pub text: Color32,
@@ -137,9 +195,14 @@ impl<T> Default for DockState<T> {
 }
 
 struct Runtime<T> {
+    /// Область переносят за заголовок.
     drag: Option<Drag>,
-    /// Куда упадёт перетаскиваемая вкладка (вычислено в прошлом кадре).
+    /// Куда упадёт переносимая область (вычислено в прошлом кадре).
     target: Target,
+    /// Жест за уголок области.
+    corner: Option<CornerDrag>,
+    /// Разделение из меню: линия идёт за курсором, щелчок — разрезать.
+    pick: Option<SplitPick>,
     /// Где на экране нарисованы области в этом кадре.
     rects: Vec<SurfaceRects>,
     /// То же для прошлого кадра — для действий между кадрами (например, «вынести в окно»).
@@ -151,20 +214,57 @@ struct Runtime<T> {
 
 impl<T> Default for Runtime<T> {
     fn default() -> Self {
-        Self { drag: None, target: Target::Nothing, rects: Vec::new(), prev_rects: Vec::new(), focused: HashMap::new(), ops: Vec::new() }
+        Self {
+            drag: None,
+            target: Target::Nothing,
+            corner: None,
+            pick: None,
+            rects: Vec::new(),
+            prev_rects: Vec::new(),
+            focused: HashMap::new(),
+            ops: Vec::new(),
+        }
     }
 }
 
 struct Drag {
     src: SurfaceKey,
     area: AreaId,
-    index: usize,
     title: String,
     /// Курсор в экранных координатах.
     pointer: Option<Pos2>,
     released: bool,
     /// Размер исходной области — такого размера будет новое окно.
     size: Vec2,
+}
+
+struct CornerDrag {
+    key: SurfaceKey,
+    area: AreaId,
+    /// Уголок, за который потянули (координаты окна).
+    corner: Pos2,
+    /// Направление разреза: выбирается первым движением внутрь, Tab меняет.
+    dir: Option<SplitDir>,
+    action: CornerAction,
+}
+
+/// Что сделает жест за уголок, если отпустить мышь сейчас.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CornerAction {
+    None,
+    /// Разделить область: копия встаёт с края `zone` и занимает долю `ratio`.
+    Split { zone: Zone, ratio: f32 },
+    /// Область поглощает соседнюю.
+    Join(AreaId),
+    /// Поменять редакторы двух областей местами (с Ctrl).
+    Swap(AreaId),
+    /// Перенести область к краю другой, а в середину — на её место.
+    Dock(AreaId, Zone),
+}
+
+struct SplitPick {
+    key: SurfaceKey,
+    dir: SplitDir,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -184,26 +284,36 @@ struct SurfaceRects {
     areas: Vec<AreaRects>,
 }
 
-/// Прямоугольники области в экранных координатах.
+/// Прямоугольники области.
 struct AreaRects {
     id: AreaId,
     header: Rect,
     body: Rect,
-    tabs: Vec<Rect>,
+}
+
+impl AreaRects {
+    fn full(&self) -> Rect {
+        self.header.union(self.body)
+    }
 }
 
 enum Op<T> {
-    Move { from: (SurfaceKey, AreaId, usize), to: Target },
-    Close { key: SurfaceKey, area: AreaId, index: usize },
-    CloseOthers { key: SurfaceKey, area: AreaId, index: usize },
+    /// Перенести область в другое место (`Center` — на место другой области).
+    Move { from: (SurfaceKey, AreaId), to: Target },
+    /// Разделить область, положив в новую часть копию редактора.
+    Split { key: SurfaceKey, area: AreaId, zone: Zone, ratio: f32 },
+    Join { key: SurfaceKey, keep: AreaId, remove: AreaId },
+    Swap { key: SurfaceKey, a: AreaId, b: AreaId },
+    /// Поменять местами половины разбиения (меню границы).
+    SwapSplit { key: SurfaceKey, first: AreaId, second: AreaId },
+    /// Новый редактор вида `kind` в пустом окне.
+    Create { key: SurfaceKey, kind: String },
+    /// Добавить редактор: разделить область `near` (или самую большую).
+    Add { key: SurfaceKey, editor: T, place: Place },
     CloseArea { key: SurfaceKey, area: AreaId },
-    Detach { key: SurfaceKey, area: AreaId, index: usize, pos: Option<Pos2>, size: Vec2 },
+    Detach { key: SurfaceKey, area: AreaId, pos: Option<Pos2>, size: Vec2 },
+    DuplicateWindow { key: SurfaceKey, area: AreaId, size: Vec2 },
     Return(u64),
-    /// Перенести вкладку в новую половину своей же области.
-    MoveToSplit { key: SurfaceKey, area: AreaId, index: usize, zone: Zone },
-    /// Разделить область, положив во вторую половину копию активной вкладки.
-    SplitDuplicate { key: SurfaceKey, area: AreaId, zone: Zone },
-    Add { key: SurfaceKey, area: Option<AreaId>, tab: T },
     ToggleMaximize { key: SurfaceKey, area: AreaId },
 }
 
@@ -211,6 +321,13 @@ fn surface_mut<'a, T>(main: &'a mut Surface<T>, windows: &'a mut [FloatWindow<T>
     match key {
         SurfaceKey::Main => Some(main),
         SurfaceKey::Window(id) => windows.iter_mut().find(|w| w.id == id).map(|w| &mut w.surface),
+    }
+}
+
+fn surface_ref<'a, T>(main: &'a Surface<T>, windows: &'a [FloatWindow<T>], key: SurfaceKey) -> Option<&'a Surface<T>> {
+    match key {
+        SurfaceKey::Main => Some(main),
+        SurfaceKey::Window(id) => windows.iter().find(|w| w.id == id).map(|w| &w.surface),
     }
 }
 
@@ -237,8 +354,13 @@ impl<T> DockState<T> {
         self.rt.focused.insert(key, area);
     }
 
+    /// Идёт перенос области, жест за уголок или разделение из меню.
     pub fn is_dragging(&self) -> bool {
-        self.rt.drag.is_some()
+        !self.idle()
+    }
+
+    fn idle(&self) -> bool {
+        self.rt.drag.is_none() && self.rt.corner.is_none() && self.rt.pick.is_none()
     }
 
     /// Чинит загруженные окна и убирает пустые.
@@ -249,20 +371,19 @@ impl<T> DockState<T> {
         self.windows.retain(|w| !w.surface.is_empty());
     }
 
-    /// Открывает вкладку в главном окне — в области, с которой работали последней.
-    pub fn open_tab(&mut self, tab: T) {
-        let area = self.focused(SurfaceKey::Main);
-        self.rt.ops.push(Op::Add { key: SurfaceKey::Main, area, tab });
+    /// Открывает редактор в главном окне: делит область по правилам `place`.
+    /// В пустом окне редактор займёт всё окно.
+    pub fn open_editor(&mut self, editor: T, place: Place) {
+        self.rt.ops.push(Op::Add { key: SurfaceKey::Main, editor, place });
     }
 
-    /// Выносит активную вкладку последней области главного окна в отдельное окно.
+    /// Выносит последнюю область главного окна в отдельное окно.
     pub fn detach_focused(&mut self, main: &Surface<T>) {
         let Some(id) = self.focused(SurfaceKey::Main).filter(|id| main.contains(*id)).or_else(|| main.first_area_id()) else {
             return;
         };
-        let Some(area) = main.area(id) else { return };
         let size = self.area_size(SurfaceKey::Main, id);
-        self.rt.ops.push(Op::Detach { key: SurfaceKey::Main, area: id, index: area.active, pos: None, size });
+        self.rt.ops.push(Op::Detach { key: SurfaceKey::Main, area: id, pos: None, size });
     }
 
     /// Разворачивает (или возвращает) последнюю область главного окна.
@@ -279,26 +400,47 @@ impl<T> DockState<T> {
         }
     }
 
+    fn area_rect(&self, key: SurfaceKey, area: AreaId) -> Option<Rect> {
+        self.rt.prev_rects.iter().filter(|s| s.key == key).flat_map(|s| &s.areas).find(|a| a.id == area).map(AreaRects::full)
+    }
+
     fn area_size(&self, key: SurfaceKey, area: AreaId) -> Vec2 {
-        self.rt
-            .prev_rects
-            .iter()
-            .filter(|s| s.key == key)
-            .flat_map(|s| &s.areas)
-            .find(|a| a.id == area)
-            .map(|a| vec2(a.body.width(), a.body.height() + HEADER_H))
-            .unwrap_or(DEFAULT_WINDOW)
+        self.area_rect(key, area).map_or(DEFAULT_WINDOW, |r| r.size())
+    }
+
+    /// Где поставить новый редактор: какую область делить и с какого края.
+    /// `None` — окно пустое, редактор займёт его целиком.
+    fn place_spot(&self, key: SurfaceKey, s: &Surface<T>, place: Place) -> Option<(AreaId, Zone)> {
+        let largest = || {
+            s.areas()
+                .iter()
+                .filter_map(|a| self.area_rect(key, a.id).map(|r| (a.id, r.area())))
+                .max_by(|x, y| x.1.total_cmp(&y.1))
+                .map(|(id, _)| id)
+        };
+        let target = place
+            .near
+            .filter(|a| s.contains(*a))
+            .or_else(largest)
+            .or_else(|| self.focused(key).filter(|a| s.contains(*a)))
+            .or_else(|| s.first_area_id())?;
+        let zone = match (place.side.filter(|z| z.split().is_some()), self.area_rect(key, target)) {
+            (Some(side), _) => side,
+            (None, Some(r)) if r.height() > r.width() * 1.1 => Zone::Bottom,
+            (None, _) => Zone::Right,
+        };
+        Some((target, zone))
     }
 }
 
 impl<T> DockState<T> {
     /// Рисует главное окно. Вызывать внутри центральной панели.
-    pub fn show_main(&mut self, ui: &mut Ui, main: &mut Surface<T>, viewer: &mut impl TabViewer<Tab = T>, style: &DockStyle) {
+    pub fn show_main(&mut self, ui: &mut Ui, main: &mut Surface<T>, viewer: &mut impl EditorViewer<Editor = T>, style: &DockStyle) {
         self.show_surface(ui, SurfaceKey::Main, main, viewer, style);
     }
 
     /// Рисует отдельные окна (каждое — своё окно ОС).
-    pub fn show_windows(&mut self, ctx: &Context, viewer: &mut impl TabViewer<Tab = T>, style: &DockStyle) {
+    pub fn show_windows(&mut self, ctx: &Context, viewer: &mut impl EditorViewer<Editor = T>, style: &DockStyle) {
         for idx in 0..self.windows.len() {
             let w = &mut self.windows[idx];
             let id = w.id;
@@ -307,8 +449,7 @@ impl<T> DockState<T> {
                 .surface
                 .areas()
                 .first()
-                .and_then(|a| a.active_tab())
-                .map(|tab| format!("{} — {}", viewer.title(tab), style.app_title))
+                .map(|a| format!("{} — {}", viewer.title(&a.editor), style.app_title))
                 .unwrap_or_else(|| style.app_title.clone());
             let mut surface = std::mem::take(&mut w.surface);
 
@@ -322,7 +463,7 @@ impl<T> DockState<T> {
             if let Some(icon) = &style.icon {
                 builder = builder.with_icon(icon.clone());
             }
-            let viewport = ViewportId::from_hash_of(("mycelium-dock-window", id));
+            let viewport = ViewportId::from_hash_of(("forma-dock-window", id));
             let (outer, inner, close) = ctx.show_viewport_immediate(viewport, builder, |ui, _class| {
                 egui::CentralPanel::default().frame(Frame::new().fill(style.gap_bg)).show(ui, |ui| {
                     self.show_surface(ui, SurfaceKey::Window(id), &mut surface, viewer, style);
@@ -342,43 +483,50 @@ impl<T> DockState<T> {
                 w.size = [r.width(), r.height()];
             }
             if close {
-                // Закрытое окно не теряет вкладки: они возвращаются в главное.
+                // Закрытое окно не теряет редакторы: они возвращаются в главное.
                 self.rt.ops.push(Op::Return(id));
             }
         }
     }
 
-    /// Завершает кадр: применяет действия, вычисляет цель перетаскивания.
+    /// Завершает кадр: применяет действия, вычисляет цель переноса.
     /// Вызывать после [`Self::show_main`] и [`Self::show_windows`].
-    pub fn finish(&mut self, ctx: &Context, main: &mut Surface<T>, viewer: &mut impl TabViewer<Tab = T>) {
+    pub fn finish(&mut self, ctx: &Context, main: &mut Surface<T>, viewer: &mut impl EditorViewer<Editor = T>) {
         let rects = std::mem::take(&mut self.rt.rects);
         if let Some(drag) = &self.rt.drag {
-            // Окно-источник пропало (например, закрылось) — перетаскивание отменяется.
+            // Окно-источник пропало (например, закрылось) — перенос отменяется.
             if !rects.iter().any(|s| s.key == drag.src) {
                 self.rt.drag = None;
             }
         }
+        if let Some(g) = &self.rt.corner
+            && !rects.iter().any(|s| s.key == g.key)
+        {
+            self.rt.corner = None;
+        }
+        if let Some(p) = &self.rt.pick
+            && !rects.iter().any(|s| s.key == p.key)
+        {
+            self.rt.pick = None;
+        }
         self.rt.target = Target::Nothing;
         if let Some(drag) = &self.rt.drag {
             let target = drag.pointer.map_or(Target::Nothing, |p| compute_target(&rects, p));
-            let target = self.filter_noop(main, drag, target);
+            let target = match target {
+                Target::Area { key, area, .. } if key == drag.src && area == drag.area => Target::Nothing,
+                t => t,
+            };
             if drag.released {
                 let drag = self.rt.drag.take().expect("проверено выше");
-                let to = match target {
-                    Target::NewWindow(p) => {
-                        self.rt.ops.push(Op::Detach {
-                            key: drag.src,
-                            area: drag.area,
-                            index: drag.index,
-                            pos: Some(p - vec2(24.0, 14.0)),
-                            size: drag.size,
-                        });
-                        Target::Nothing
-                    }
-                    t => t,
-                };
-                if to != Target::Nothing {
-                    self.rt.ops.push(Op::Move { from: (drag.src, drag.area, drag.index), to });
+                match target {
+                    Target::NewWindow(p) => self.rt.ops.push(Op::Detach {
+                        key: drag.src,
+                        area: drag.area,
+                        pos: Some(p - vec2(24.0, 14.0)),
+                        size: drag.size,
+                    }),
+                    Target::Nothing => {}
+                    to => self.rt.ops.push(Op::Move { from: (drag.src, drag.area), to }),
                 }
             } else {
                 self.rt.target = target;
@@ -396,126 +544,99 @@ impl<T> DockState<T> {
         self.rt.focused.retain(|k, _| *k == SurfaceKey::Main || open.contains(k));
     }
 
-    /// Бросок, который ничего не изменит, не подсвечиваем и не выполняем.
-    fn filter_noop(&self, main: &Surface<T>, drag: &Drag, target: Target) -> Target {
-        let Target::Area { key, area, zone } = target else { return target };
-        if key != drag.src || area != drag.area {
-            return target;
-        }
-        let tabs = match drag.src {
-            SurfaceKey::Main => main.area(area).map(|a| a.tabs.len()),
-            SurfaceKey::Window(id) => self.windows.iter().find(|w| w.id == id).and_then(|w| w.surface.area(area)).map(|a| a.tabs.len()),
-        }
-        .unwrap_or(0);
-        let noop = match zone {
-            Zone::Center => true,
-            Zone::Tab(i) => i == drag.index || i == drag.index + 1,
-            _ => tabs <= 1,
-        };
-        if noop { Target::Nothing } else { target }
-    }
-
-    fn apply(&mut self, op: Op<T>, main: &mut Surface<T>, viewer: &mut impl TabViewer<Tab = T>) {
+    fn apply(&mut self, op: Op<T>, main: &mut Surface<T>, viewer: &mut impl EditorViewer<Editor = T>) {
         match op {
-            Op::Move { from: (key, area, index), to } => {
-                let Some(src) = surface_mut(main, &mut self.windows, key) else { return };
-                let Some(tab) = src.remove_tab(area, index) else { return };
-                let new_id = self.new_area_id();
-                match to {
-                    Target::Area { key: tkey, area: tarea, zone } => {
-                        // Внутри одной строки вкладок номера после удаления сдвигаются.
-                        let zone = match zone {
-                            Zone::Tab(i) if tkey == key && tarea == area && index < i => Zone::Tab(i - 1),
-                            z => z,
-                        };
-                        match surface_mut(main, &mut self.windows, tkey) {
-                            Some(dst) => {
-                                dst.insert(tarea, zone, tab, new_id);
-                                let focus = if zone.split().is_some() { new_id } else { tarea };
-                                self.rt.focused.insert(tkey, focus);
-                            }
-                            None => main.add_tab(tab, None, new_id),
-                        }
+            Op::Move { from: (key, area), to } => {
+                let valid = match to {
+                    Target::Area { key: tk, area: ta, .. } => {
+                        !(tk == key && ta == area) && surface_ref(main, &self.windows, tk).is_some_and(|s| s.contains(ta))
                     }
-                    Target::Empty(tkey) => match surface_mut(main, &mut self.windows, tkey) {
-                        Some(dst) => {
-                            dst.add_tab(tab, None, new_id);
-                            self.rt.focused.insert(tkey, new_id);
-                        }
-                        None => main.add_tab(tab, None, new_id),
-                    },
-                    Target::NewWindow(p) => self.spawn_window(tab, Some(p), DEFAULT_WINDOW),
-                    Target::Nothing => main.add_tab(tab, None, new_id),
-                }
-            }
-            Op::Close { key, area, index } => {
-                if let Some(tab) = surface_mut(main, &mut self.windows, key).and_then(|s| s.remove_tab(area, index)) {
-                    viewer.on_close(tab);
-                }
-            }
-            Op::CloseOthers { key, area, index } => {
-                let Some(a) = surface_mut(main, &mut self.windows, key).and_then(|s| s.area_mut(area)) else { return };
-                if index >= a.tabs.len() {
+                    Target::Empty(tk) => surface_ref(main, &self.windows, tk).is_some_and(Surface::is_empty),
+                    Target::NewWindow(_) => true,
+                    Target::Nothing => false,
+                };
+                if !valid {
                     return;
                 }
-                let keep = a.tabs.remove(index);
-                let others = std::mem::replace(&mut a.tabs, vec![keep]);
-                a.active = 0;
-                for tab in others {
-                    viewer.on_close(tab);
+                let Some(moved) = surface_mut(main, &mut self.windows, key).and_then(|s| s.remove_area(area)) else { return };
+                match to {
+                    Target::Area { key: tk, area: ta, zone } => {
+                        let s = surface_mut(main, &mut self.windows, tk).expect("проверено выше");
+                        s.maximized = None;
+                        if zone == Zone::Center {
+                            if let Ok(old) = s.replace_editor(ta, moved.editor) {
+                                viewer.on_close(old);
+                            }
+                            self.rt.focused.insert(tk, ta);
+                        } else if let Err(a) = s.split_area(ta, zone, moved, 0.5) {
+                            viewer.on_close(a.editor);
+                        } else {
+                            self.rt.focused.insert(tk, area);
+                        }
+                    }
+                    Target::Empty(tk) => {
+                        let s = surface_mut(main, &mut self.windows, tk).expect("проверено выше");
+                        s.root = Some(Node::Area(moved));
+                        self.rt.focused.insert(tk, area);
+                    }
+                    Target::NewWindow(p) => self.spawn_window(moved.editor, Some(p), DEFAULT_WINDOW),
+                    Target::Nothing => {}
                 }
             }
+            Op::Split { key, area, zone, ratio } => {
+                let id = self.new_area_id();
+                let Some(s) = surface_mut(main, &mut self.windows, key) else { return };
+                let Some(copy) = s.area(area).map(|a| viewer.duplicate(&a.editor)) else { return };
+                match s.split_area(area, zone, Area::new(id, copy), ratio) {
+                    Ok(()) => {
+                        self.rt.focused.insert(key, id);
+                    }
+                    Err(a) => viewer.on_close(a.editor),
+                }
+            }
+            Op::Join { key, keep, remove } => {
+                if let Some(editor) = surface_mut(main, &mut self.windows, key).and_then(|s| s.join(keep, remove)) {
+                    viewer.on_close(editor);
+                    self.rt.focused.insert(key, keep);
+                }
+            }
+            Op::Swap { key, a, b } => {
+                if surface_mut(main, &mut self.windows, key).is_some_and(|s| s.swap_editors(a, b)) {
+                    self.rt.focused.insert(key, b);
+                }
+            }
+            Op::SwapSplit { key, first, second } => {
+                if let Some(s) = surface_mut(main, &mut self.windows, key) {
+                    s.swap_split(first, second);
+                }
+            }
+            Op::Create { key, kind } => {
+                if let Some(editor) = viewer.create(&kind) {
+                    self.add_editor(main, key, editor, Place::default(), viewer);
+                }
+            }
+            Op::Add { key, editor, place } => self.add_editor(main, key, editor, place, viewer),
             Op::CloseArea { key, area } => {
                 if let Some(a) = surface_mut(main, &mut self.windows, key).and_then(|s| s.remove_area(area)) {
-                    for tab in a.tabs {
-                        viewer.on_close(tab);
-                    }
+                    viewer.on_close(a.editor);
                 }
             }
-            Op::Detach { key, area, index, pos, size } => {
-                if let Some(tab) = surface_mut(main, &mut self.windows, key).and_then(|s| s.remove_tab(area, index)) {
-                    self.spawn_window(tab, pos, size);
+            Op::Detach { key, area, pos, size } => {
+                if let Some(a) = surface_mut(main, &mut self.windows, key).and_then(|s| s.remove_area(area)) {
+                    self.spawn_window(a.editor, pos, size);
+                }
+            }
+            Op::DuplicateWindow { key, area, size } => {
+                if let Some(copy) = surface_ref(main, &self.windows, key).and_then(|s| s.area(area)).map(|a| viewer.duplicate(&a.editor)) {
+                    self.spawn_window(copy, None, size);
                 }
             }
             Op::Return(id) => {
                 let Some(i) = self.windows.iter().position(|w| w.id == id) else { return };
                 let mut w = self.windows.remove(i);
-                let prefer = self.focused(SurfaceKey::Main);
-                for tab in w.surface.take_all_tabs() {
-                    let new_id = self.new_area_id();
-                    main.add_tab(tab, prefer, new_id);
+                for editor in w.surface.take_all() {
+                    self.add_editor(main, SurfaceKey::Main, editor, Place::default(), viewer);
                 }
-            }
-            Op::MoveToSplit { key, area, index, zone } => {
-                let new_id = self.new_area_id();
-                let Some(s) = surface_mut(main, &mut self.windows, key) else { return };
-                if s.area(area).is_none_or(|a| a.tabs.len() < 2) {
-                    return;
-                }
-                if let Some(tab) = s.remove_tab(area, index) {
-                    s.insert(area, zone, tab, new_id);
-                    self.rt.focused.insert(key, new_id);
-                }
-            }
-            Op::SplitDuplicate { key, area, zone } => {
-                let new_id = self.new_area_id();
-                let Some(s) = surface_mut(main, &mut self.windows, key) else { return };
-                let Some(tab) = s.area(area).and_then(|a| a.active_tab()).map(|t| viewer.duplicate(t)) else { return };
-                s.insert(area, zone, tab, new_id);
-                self.rt.focused.insert(key, new_id);
-            }
-            Op::Add { key, area, tab } => {
-                let new_id = self.new_area_id();
-                // Окно могли закрыть в этом же кадре — тогда вкладка идёт в главное.
-                let exists = match key {
-                    SurfaceKey::Main => true,
-                    SurfaceKey::Window(id) => self.windows.iter().any(|w| w.id == id),
-                };
-                let key = if exists { key } else { SurfaceKey::Main };
-                let s = surface_mut(main, &mut self.windows, key).expect("окно существует");
-                s.add_tab(tab, area, new_id);
-                let focus = area.filter(|a| s.contains(*a)).unwrap_or_else(|| s.first_area_id().unwrap_or(new_id));
-                self.rt.focused.insert(key, focus);
             }
             Op::ToggleMaximize { key, area } => {
                 if let Some(s) = surface_mut(main, &mut self.windows, key) {
@@ -525,13 +646,32 @@ impl<T> DockState<T> {
         }
     }
 
-    fn spawn_window(&mut self, tab: T, pos: Option<Pos2>, size: Vec2) {
+    /// Кладёт редактор в окно `key` (если окна уже нет — в главное).
+    fn add_editor(&mut self, main: &mut Surface<T>, key: SurfaceKey, editor: T, place: Place, viewer: &mut impl EditorViewer<Editor = T>) {
+        let key = if surface_ref(main, &self.windows, key).is_some() { key } else { SurfaceKey::Main };
+        let spot = self.place_spot(key, surface_ref(main, &self.windows, key).expect("окно есть"), place);
+        let id = self.new_area_id();
+        let s = surface_mut(main, &mut self.windows, key).expect("окно есть");
+        s.maximized = None;
+        match spot {
+            None => s.root = Some(Node::area(id, editor)),
+            Some((target, zone)) => {
+                if let Err(a) = s.split_area(target, zone, Area::new(id, editor), place.share) {
+                    viewer.on_close(a.editor);
+                    return;
+                }
+            }
+        }
+        self.rt.focused.insert(key, id);
+    }
+
+    fn spawn_window(&mut self, editor: T, pos: Option<Pos2>, size: Vec2) {
         let id = self.new_area_id().0;
         let area = self.new_area_id();
         let size = vec2(size.x.max(360.0), size.y.max(240.0));
         self.windows.push(FloatWindow {
             id,
-            surface: Surface::new(Node::area(area, vec![tab])),
+            surface: Surface::new(Node::area(area, editor)),
             pos: pos.map(|p| [p.x, p.y]),
             size: [size.x, size.y],
             spawn: None,
@@ -539,7 +679,7 @@ impl<T> DockState<T> {
     }
 }
 
-/// Куда упадёт вкладка, если отпустить её в точке `p` (экранные координаты).
+/// Куда упадёт область, если отпустить её в точке `p` (экранные координаты).
 fn compute_target(rects: &[SurfaceRects], p: Pos2) -> Target {
     // Отдельные окна обычно лежат поверх главного, поэтому проверяем их первыми.
     let ordered = rects.iter().rev().filter(|s| s.key != SurfaceKey::Main).chain(rects.iter().filter(|s| s.key == SurfaceKey::Main));
@@ -548,12 +688,8 @@ fn compute_target(rects: &[SurfaceRects], p: Pos2) -> Target {
             continue;
         }
         for a in &s.areas {
-            if a.header.contains(p) {
-                let index = a.tabs.iter().filter(|r| r.center().x < p.x).count();
-                return Target::Area { key: s.key, area: a.id, zone: Zone::Tab(index) };
-            }
-            if a.body.contains(p) {
-                return Target::Area { key: s.key, area: a.id, zone: zone_at(a.body, p) };
+            if a.full().contains(p) {
+                return Target::Area { key: s.key, area: a.id, zone: zone_at(a.full(), p) };
             }
         }
         return if s.areas.is_empty() { Target::Empty(s.key) } else { Target::Nothing };
@@ -561,9 +697,9 @@ fn compute_target(rects: &[SurfaceRects], p: Pos2) -> Target {
     Target::NewWindow(p)
 }
 
-/// Зона области под курсором: середина — вкладкой, края — разделить.
-fn zone_at(body: Rect, p: Pos2) -> Zone {
-    let rel = (p - body.min) / body.size().max(vec2(1.0, 1.0));
+/// Зона области под курсором: середина — заменить, края — встать рядом.
+fn zone_at(rect: Rect, p: Pos2) -> Zone {
+    let rel = (p - rect.min) / rect.size().max(vec2(1.0, 1.0));
     let dx = rel.x.min(1.0 - rel.x);
     let dy = rel.y.min(1.0 - rel.y);
     if dx.min(dy) > 0.28 {
@@ -577,23 +713,14 @@ fn zone_at(body: Rect, p: Pos2) -> Zone {
     }
 }
 
-/// Прямоугольник, который подсвечивается при броске в зону.
-fn zone_rect(a: &AreaRects, zone: Zone) -> Rect {
-    let b = a.body;
+/// Прямоугольник, который подсвечивается для зоны области.
+fn zone_rect(r: Rect, zone: Zone) -> Rect {
     match zone {
-        Zone::Center => b,
-        Zone::Left => Rect::from_min_max(b.min, pos2(b.center().x, b.max.y)),
-        Zone::Right => Rect::from_min_max(pos2(b.center().x, b.min.y), b.max),
-        Zone::Top => Rect::from_min_max(b.min, pos2(b.max.x, b.center().y)),
-        Zone::Bottom => Rect::from_min_max(pos2(b.min.x, b.center().y), b.max),
-        Zone::Tab(i) => {
-            let x = match (a.tabs.get(i), a.tabs.last()) {
-                (Some(r), _) => r.left(),
-                (None, Some(last)) => last.right(),
-                (None, None) => a.header.left() + 6.0,
-            };
-            Rect::from_center_size(pos2(x, a.header.center().y), vec2(3.0, a.header.height() - 8.0))
-        }
+        Zone::Center => r,
+        Zone::Left => Rect::from_min_max(r.min, pos2(r.center().x, r.max.y)),
+        Zone::Right => Rect::from_min_max(pos2(r.center().x, r.min.y), r.max),
+        Zone::Top => Rect::from_min_max(r.min, pos2(r.max.x, r.center().y)),
+        Zone::Bottom => Rect::from_min_max(pos2(r.min.x, r.center().y), r.max),
     }
 }
 
@@ -620,6 +747,52 @@ fn split_rect(rect: Rect, dir: SplitDir, ratio: f32) -> (Rect, Rect, Rect) {
     }
 }
 
+/// Доля первой части, если разрезать `rect` в направлении `dir` через точку `p`.
+/// `None` — одна из частей вышла бы меньше допустимого.
+fn cut_ratio(rect: Rect, dir: SplitDir, p: Pos2) -> Option<f32> {
+    let (len, at) = match dir {
+        SplitDir::Horizontal => (rect.width(), p.x - rect.left()),
+        SplitDir::Vertical => (rect.height(), p.y - rect.top()),
+    };
+    let avail = len - GAP;
+    let first = at - GAP / 2.0;
+    (first >= MIN_AREA && avail - first >= MIN_AREA).then(|| first / avail)
+}
+
+/// Что сделает жест за уголок `corner` области `src`, если отпустить мышь в точке `p`
+/// (всё — в координатах окна). Внутри своей области — разрез (направление выбирается первым
+/// движением и запоминается в `dir`), в соседней — объединение, с Ctrl — обмен, в любой
+/// другой — перенос к её краю или на её место.
+fn corner_action(areas: &[AreaRects], src: AreaId, corner: Pos2, p: Pos2, dir: &mut Option<SplitDir>, joinable: &[AreaId], ctrl: bool) -> CornerAction {
+    let Some(own) = areas.iter().find(|a| a.id == src) else { return CornerAction::None };
+    let full = own.full();
+    match areas.iter().find(|a| a.full().contains(p)) {
+        Some(a) if a.id == src => {
+            let d = p - corner;
+            if dir.is_none() {
+                if d.length() < CORNER_THRESHOLD {
+                    return CornerAction::None;
+                }
+                // Ведут вбок — линия разреза вертикальная, области встанут рядом.
+                *dir = Some(if d.x.abs() >= d.y.abs() { SplitDir::Horizontal } else { SplitDir::Vertical });
+            }
+            let dir = dir.expect("выбрано выше");
+            let Some(first) = cut_ratio(full, dir, p) else { return CornerAction::None };
+            // Новая часть — со стороны уголка.
+            match dir {
+                SplitDir::Horizontal if corner.x < full.center().x => CornerAction::Split { zone: Zone::Left, ratio: first },
+                SplitDir::Horizontal => CornerAction::Split { zone: Zone::Right, ratio: 1.0 - first },
+                SplitDir::Vertical if corner.y < full.center().y => CornerAction::Split { zone: Zone::Top, ratio: first },
+                SplitDir::Vertical => CornerAction::Split { zone: Zone::Bottom, ratio: 1.0 - first },
+            }
+        }
+        Some(a) if ctrl => CornerAction::Swap(a.id),
+        Some(a) if joinable.contains(&a.id) => CornerAction::Join(a.id),
+        Some(a) => CornerAction::Dock(a.id, zone_at(a.full(), p)),
+        None => CornerAction::None,
+    }
+}
+
 // ============================================================================================
 // Отрисовка
 // ============================================================================================
@@ -631,7 +804,7 @@ struct Frame0 {
 }
 
 impl<T> DockState<T> {
-    fn show_surface(&mut self, ui: &mut Ui, key: SurfaceKey, surface: &mut Surface<T>, viewer: &mut impl TabViewer<Tab = T>, style: &DockStyle) {
+    fn show_surface(&mut self, ui: &mut Ui, key: SurfaceKey, surface: &mut Surface<T>, viewer: &mut impl EditorViewer<Editor = T>, style: &DockStyle) {
         let ctx = ui.ctx().clone();
         if matches!(key, SurfaceKey::Window(_)) {
             viewer.window_input(ui);
@@ -656,12 +829,15 @@ impl<T> DockState<T> {
 
         // Сочетание разворачивает область под курсором (или последнюю, с которой работали).
         if style.maximize_keys.iter().any(|k| ui.input_mut(|i| i.consume_shortcut(k))) {
-            let hovered = ui.input(|i| i.pointer.hover_pos()).and_then(|p| frame.areas.iter().find(|a| a.header.union(a.body).contains(p)).map(|a| a.id));
+            let hovered = ui.input(|i| i.pointer.hover_pos()).and_then(|p| frame.areas.iter().find(|a| a.full().contains(p)).map(|a| a.id));
             let area = surface.maximized.or(hovered).or_else(|| self.focused(key).filter(|id| surface.contains(*id))).or_else(|| surface.first_area_id());
             if let Some(area) = area {
                 self.rt.ops.push(Op::ToggleMaximize { key, area });
             }
         }
+
+        self.track_corner(ui, key, surface, &frame, rect, style);
+        self.track_pick(ui, key, &frame, rect, style);
 
         // Экранные координаты окна: от них считаются броски между окнами.
         let window = ctx.input(|i| i.viewport().inner_rect);
@@ -671,11 +847,7 @@ impl<T> DockState<T> {
             self.rt.rects.push(SurfaceRects {
                 key,
                 window,
-                areas: frame
-                    .areas
-                    .iter()
-                    .map(|a| AreaRects { id: a.id, header: shift(a.header), body: shift(a.body), tabs: a.tabs.iter().map(|r| shift(*r)).collect() })
-                    .collect(),
+                areas: frame.areas.iter().map(|a| AreaRects { id: a.id, header: shift(a.header), body: shift(a.body) }).collect(),
             });
         }
 
@@ -683,13 +855,146 @@ impl<T> DockState<T> {
         self.paint_drop_overlay(ui, &frame, rect, style);
     }
 
-    /// Обновляет положение перетаскиваемой вкладки, если её тащат из этого окна.
+    /// Жест за уголок: каждый кадр пересчитывает, что произойдёт, рисует подсказку,
+    /// а когда кнопку отпускают — выполняет.
+    fn track_corner(&mut self, ui: &mut Ui, key: SurfaceKey, surface: &Surface<T>, frame: &Frame0, surface_rect: Rect, style: &DockStyle) {
+        let Some(g) = &mut self.rt.corner else { return };
+        if g.key != key {
+            return;
+        }
+        let (p, down, cancel, ctrl, tab) = ui.input_mut(|i| {
+            (
+                i.pointer.latest_pos(),
+                i.pointer.primary_down(),
+                i.consume_key(Modifiers::NONE, Key::Escape) || i.pointer.secondary_pressed(),
+                i.modifiers.ctrl,
+                i.consume_key(Modifiers::NONE, Key::Tab),
+            )
+        });
+        if cancel || !frame.areas.iter().any(|a| a.id == g.area) {
+            self.rt.corner = None;
+            return;
+        }
+        if tab && let Some(d) = &mut g.dir {
+            *d = d.flip();
+        }
+        let joinable: Vec<AreaId> = surface.siblings().into_iter().filter(|(a, _, _)| *a == g.area).map(|(_, b, _)| b).collect();
+        if let Some(p) = p {
+            g.action = corner_action(&frame.areas, g.area, g.corner, p, &mut g.dir, &joinable, ctrl);
+        }
+        if !down {
+            let (area, action) = (g.area, g.action);
+            self.rt.corner = None;
+            let op = match action {
+                CornerAction::None => None,
+                CornerAction::Split { zone, ratio } => Some(Op::Split { key, area, zone, ratio }),
+                CornerAction::Join(other) => Some(Op::Join { key, keep: area, remove: other }),
+                CornerAction::Swap(other) => Some(Op::Swap { key, a: area, b: other }),
+                CornerAction::Dock(other, zone) => Some(Op::Move { from: (key, area), to: Target::Area { key, area: other, zone } }),
+            };
+            self.rt.ops.extend(op);
+            return;
+        }
+
+        ui.ctx().set_cursor_icon(match g.action {
+            CornerAction::Dock(..) | CornerAction::Swap(_) => CursorIcon::Move,
+            _ => CursorIcon::Crosshair,
+        });
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new(("forma-dock-gesture", key))));
+        let Some(own) = frame.areas.iter().find(|a| a.id == g.area).map(AreaRects::full) else { return };
+        let rect_of = |id: AreaId| frame.areas.iter().find(|a| a.id == id).map(AreaRects::full);
+        let fill = style.accent.gamma_multiply(0.18);
+        let stroke = Stroke::new(1.5, style.accent.gamma_multiply(0.9));
+        let hint = match g.action {
+            CornerAction::None => t!("dock-gesture-none"),
+            CornerAction::Split { zone, ratio } => {
+                let (dir, new_first) = zone.split().expect("у разреза есть край");
+                let first = if new_first { ratio } else { 1.0 - ratio };
+                let (r1, sep, r2) = split_rect(own, dir, first);
+                painter.rect_filled(if new_first { r1 } else { r2 }, CornerRadius::same(RADIUS), style.accent.gamma_multiply(0.08));
+                paint_cut(&painter, sep, dir, style);
+                t!("dock-gesture-split")
+            }
+            CornerAction::Join(other) => {
+                if let Some(r) = rect_of(other) {
+                    painter.rect_filled(r, CornerRadius::same(RADIUS), Color32::from_black_alpha(110));
+                    painter.rect_stroke(own, CornerRadius::same(RADIUS), stroke, StrokeKind::Inside);
+                    // Стрелка из остающейся области в ту, что исчезнет.
+                    let d = r.center() - own.center();
+                    let d = if d.x.abs() > d.y.abs() { vec2(d.x.signum(), 0.0) } else { vec2(0.0, d.y.signum()) };
+                    let len = 48.0_f32.min(r.width().min(r.height()) * 0.4);
+                    painter.arrow(r.center() - d * len / 2.0, d * len, Stroke::new(3.0, style.text_strong));
+                }
+                t!("dock-gesture-join")
+            }
+            CornerAction::Swap(other) => {
+                for r in [Some(own), rect_of(other)].into_iter().flatten() {
+                    painter.rect(r, CornerRadius::same(RADIUS), fill, stroke, StrokeKind::Inside);
+                }
+                t!("dock-gesture-swap")
+            }
+            CornerAction::Dock(other, zone) => {
+                if let Some(r) = rect_of(other) {
+                    painter.rect(zone_rect(r, zone).shrink(3.0), CornerRadius::same(RADIUS), fill, stroke, StrokeKind::Inside);
+                }
+                if zone == Zone::Center { t!("dock-gesture-replace") } else { t!("dock-gesture-dock") }
+            }
+        };
+        paint_hint(&painter, surface_rect, &format!("{hint}   ·   {}", t!("dock-gesture-keys")), style);
+    }
+
+    /// Разделение из меню: линия разреза идёт за курсором по области под ним.
+    fn track_pick(&mut self, ui: &mut Ui, key: SurfaceKey, frame: &Frame0, surface_rect: Rect, style: &DockStyle) {
+        let Some(pick) = &mut self.rt.pick else { return };
+        if pick.key != key {
+            return;
+        }
+        // Ловушка поверх областей: щелчок для разреза не должен достаться редактору.
+        let resp = ui.interact(surface_rect, Id::new(("forma-dock-pick", key)), Sense::click());
+        let (p, cancel, tab) = ui.input_mut(|i| {
+            (i.pointer.latest_pos(), i.consume_key(Modifiers::NONE, Key::Escape), i.consume_key(Modifiers::NONE, Key::Tab))
+        });
+        if cancel || resp.secondary_clicked() {
+            self.rt.pick = None;
+            return;
+        }
+        if tab {
+            pick.dir = pick.dir.flip();
+        }
+        let dir = pick.dir;
+        let cut = p.and_then(|p| {
+            let a = frame.areas.iter().find(|a| a.full().contains(p))?;
+            Some((a.id, a.full(), cut_ratio(a.full(), dir, p)?))
+        });
+        ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new(("forma-dock-gesture", key))));
+        if let Some((_, rect, first)) = cut {
+            let (_, sep, _) = split_rect(rect, dir, first);
+            paint_cut(&painter, sep, dir, style);
+        }
+        paint_hint(&painter, surface_rect, &t!("dock-split-hint"), style);
+        if resp.clicked() {
+            self.rt.pick = None;
+            if let Some((area, _, first)) = cut {
+                let zone = if dir == SplitDir::Horizontal { Zone::Right } else { Zone::Bottom };
+                self.rt.ops.push(Op::Split { key, area, zone, ratio: 1.0 - first });
+            }
+        }
+    }
+
+    /// Обновляет положение переносимой области, если её тащат из этого окна.
     fn track_drag(&mut self, ui: &Ui, key: SurfaceKey, offset: Option<Vec2>, style: &DockStyle) {
         let Some(drag) = &mut self.rt.drag else { return };
         if drag.src != key {
             return;
         }
-        let (local, down) = ui.input(|i| (i.pointer.latest_pos().or(i.pointer.interact_pos()), i.pointer.primary_down()));
+        let (local, down, cancel) = ui.input_mut(|i| {
+            (i.pointer.latest_pos().or(i.pointer.interact_pos()), i.pointer.primary_down(), i.consume_key(Modifiers::NONE, Key::Escape))
+        });
+        if cancel {
+            self.rt.drag = None;
+            return;
+        }
         if let (Some(p), Some(off)) = (local, offset) {
             drag.pointer = Some(p + off);
         }
@@ -697,9 +1002,9 @@ impl<T> DockState<T> {
             drag.released = true;
         }
         ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-        // «Призрак» вкладки у курсора, пока курсор над окном-источником.
+        // «Призрак» области у курсора, пока курсор над окном-источником.
         if let Some(p) = local.filter(|p| ui.ctx().content_rect().contains(*p)) {
-            let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::new("mycelium-dock-ghost")));
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::new("forma-dock-ghost")));
             let galley = painter.layout_no_wrap(drag.title.clone(), FontId::proportional(13.0), style.text_strong);
             let r = Rect::from_min_size(p + vec2(14.0, 10.0), galley.size() + vec2(20.0, 10.0));
             painter.rect(r, CornerRadius::same(7), style.header_bg, Stroke::new(1.0, style.accent), StrokeKind::Inside);
@@ -711,15 +1016,13 @@ impl<T> DockState<T> {
         if self.rt.drag.is_none() {
             return;
         }
-        let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("mycelium-dock-overlay")));
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("forma-dock-overlay")));
         let fill = style.accent.gamma_multiply(0.22);
         let stroke = Stroke::new(1.5, style.accent.gamma_multiply(0.9));
         match self.rt.target {
             Target::Area { key, area, zone } if key == frame.key => {
                 if let Some(a) = frame.areas.iter().find(|a| a.id == area) {
-                    let r = zone_rect(a, zone);
-                    let radius = if matches!(zone, Zone::Tab(_)) { 2 } else { RADIUS };
-                    painter.rect(r.shrink(if matches!(zone, Zone::Tab(_)) { 0.0 } else { 3.0 }), CornerRadius::same(radius), fill, stroke, StrokeKind::Inside);
+                    painter.rect(zone_rect(a.full(), zone).shrink(3.0), CornerRadius::same(RADIUS), fill, stroke, StrokeKind::Inside);
                 }
             }
             Target::Empty(key) if key == frame.key => {
@@ -729,7 +1032,7 @@ impl<T> DockState<T> {
         }
     }
 
-    fn empty_surface(&mut self, ui: &mut Ui, key: SurfaceKey, rect: Rect, viewer: &mut impl TabViewer<Tab = T>, style: &DockStyle) {
+    fn empty_surface(&mut self, ui: &mut Ui, key: SurfaceKey, rect: Rect, viewer: &mut impl EditorViewer<Editor = T>, style: &DockStyle) {
         let painter = ui.painter();
         painter.rect_filled(rect, CornerRadius::same(RADIUS), style.area_bg);
         let mut child = ui.new_child(UiBuilder::new().max_rect(rect).layout(egui::Layout::top_down(egui::Align::Center)));
@@ -738,32 +1041,53 @@ impl<T> DockState<T> {
         child.add_space(4.0);
         child.label(egui::RichText::new(t!("dock-empty-hint")).size(13.0).color(style.text_muted));
         child.add_space(12.0);
-        let resp = child.button(t!("dock-add-editor-button"));
-        let menu = egui::Popup::menu(&resp).style(style.menu_style).show(|ui| viewer.add_menu(ui));
-        if let Some(tab) = menu.and_then(|r| r.inner) {
-            self.rt.ops.push(Op::Add { key, area: None, tab });
+        let resp = child.button(t!("dock-empty-button"));
+        let picked = egui::Popup::menu(&resp)
+            .style(style.menu_style)
+            .show(|ui| {
+                let groups = viewer.kinds();
+                kind_menu(ui, &groups, None, style)
+            })
+            .and_then(|r| r.inner);
+        if let Some(kind) = picked {
+            self.rt.ops.push(Op::Create { key, kind });
         }
     }
 
-    fn show_node(&mut self, ui: &mut Ui, frame: &mut Frame0, node: &mut Node<T>, rect: Rect, viewer: &mut impl TabViewer<Tab = T>, style: &DockStyle) {
+    fn show_node(&mut self, ui: &mut Ui, frame: &mut Frame0, node: &mut Node<T>, rect: Rect, viewer: &mut impl EditorViewer<Editor = T>, style: &DockStyle) {
         match node {
             Node::Area(area) => self.show_area(ui, frame, area, rect, false, viewer, style),
             Node::Split { dir, ratio, children } => {
                 let (r1, sep, r2) = split_rect(rect, *dir, *ratio);
-                let id = Id::new(("mycelium-dock-sep", frame.key, children[0].first_area().id, children[1].first_area().id));
-                let resp = ui.interact(sep.expand(2.0), id, Sense::drag());
+                let key = frame.key;
+                let first = children[0].first_area().id;
+                let second = children[1].first_area().id;
+                let both_areas = matches!(&**children, [Node::Area(_), Node::Area(_)]);
+                let id = Id::new(("forma-dock-sep", key, first, second));
+                let resp = ui.interact(sep.expand(2.0), id, Sense::click_and_drag());
                 let horizontal = *dir == SplitDir::Horizontal;
-                if resp.hovered() || resp.dragged() {
+                let idle = self.idle();
+                if idle && (resp.hovered() || resp.dragged()) {
                     ui.ctx().set_cursor_icon(if horizontal { CursorIcon::ResizeHorizontal } else { CursorIcon::ResizeVertical });
                 }
-                if resp.dragged() {
-                    if let Some(p) = resp.interact_pointer_pos() {
-                        let (pos, start, len) = if horizontal { (p.x, rect.left(), rect.width() - GAP) } else { (p.y, rect.top(), rect.height() - GAP) };
-                        let min = (MIN_AREA / len.max(1.0)).min(0.45);
-                        *ratio = ((pos - start - GAP / 2.0) / len.max(1.0)).clamp(min, 1.0 - min);
+                if idle
+                    && resp.dragged()
+                    && let Some(p) = resp.interact_pointer_pos()
+                {
+                    let (pos, start, len) = if horizontal { (p.x, rect.left(), rect.width() - GAP) } else { (p.y, rect.top(), rect.height() - GAP) };
+                    let min = (MIN_AREA / len.max(1.0)).min(0.45);
+                    let mut r = (pos - start - GAP / 2.0) / len.max(1.0);
+                    // С Ctrl граница прилипает к четвертям и третям.
+                    if ui.input(|i| i.modifiers.ctrl) {
+                        r = [0.25, 1.0 / 3.0, 0.5, 2.0 / 3.0, 0.75].into_iter().min_by(|a, b| (a - r).abs().total_cmp(&(b - r).abs())).unwrap_or(r);
                     }
+                    *ratio = r.clamp(min, 1.0 - min);
                 }
-                let t = ui.ctx().animate_bool_with_time(id, resp.hovered() || resp.dragged(), 0.12);
+                let dir_now = *dir;
+                egui::Popup::context_menu(&resp).style(style.menu_style).show(|ui| {
+                    self.border_menu(ui, key, dir_now, first, second, both_areas);
+                });
+                let t = ui.ctx().animate_bool_with_time(id, idle && (resp.hovered() || resp.dragged()), 0.12);
                 if t > 0.0 {
                     let line = if horizontal {
                         Rect::from_center_size(sep.center(), vec2(2.0, sep.height() - 16.0))
@@ -780,12 +1104,12 @@ impl<T> DockState<T> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn show_area(&mut self, ui: &mut Ui, frame: &mut Frame0, area: &mut Area<T>, rect: Rect, maximized: bool, viewer: &mut impl TabViewer<Tab = T>, style: &DockStyle) {
+    fn show_area(&mut self, ui: &mut Ui, frame: &mut Frame0, area: &mut Area<T>, rect: Rect, maximized: bool, viewer: &mut impl EditorViewer<Editor = T>, style: &DockStyle) {
         let key = frame.key;
         let ctx = ui.ctx().clone();
         let header = Rect::from_min_size(rect.min, vec2(rect.width(), HEADER_H));
         let body = Rect::from_min_max(pos2(rect.left(), header.bottom()), rect.max);
-        area.clamp_active();
+        let editor_id = viewer.id(&area.editor);
 
         // Щелчок в любом месте области делает её «текущей».
         let pressed_here = ui.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| rect.contains(p)));
@@ -797,150 +1121,169 @@ impl<T> DockState<T> {
         let painter = ui.painter().clone();
         painter.rect_filled(rect, CornerRadius::same(RADIUS), style.area_bg);
         painter.rect_filled(header, CornerRadius { nw: RADIUS, ne: RADIUS, sw: 0, se: 0 }, style.header_bg);
-        let focus_t = ctx.animate_bool_with_time(Id::new(("mycelium-dock-focus", area.id)), focused, 0.2);
+        let focus_t = ctx.animate_bool_with_time(Id::new(("forma-dock-focus", area.id)), focused, 0.2);
         let outline = style.border.lerp_to_gamma(style.accent.gamma_multiply(0.55), focus_t);
         painter.rect_stroke(rect, CornerRadius::same(RADIUS), Stroke::new(1.0, outline), StrokeKind::Inside);
 
-        // Кнопки справа в строке вкладок: «+» и меню области. В узкой области «+» прячется
-        // в меню области, чтобы вкладкам осталось место.
-        let btn = 24.0;
-        let show_add = rect.width() >= ADD_BUTTON_MIN_W;
-        let menu_rect = Rect::from_center_size(pos2(header.right() - 6.0 - btn / 2.0, header.center().y), vec2(btn, btn));
-        let add_rect = menu_rect.translate(vec2(-btn - 2.0, 0.0));
-        let buttons_left = if show_add { add_rect.left() } else { menu_rect.left() };
-        let tabs_rect = Rect::from_min_max(header.min + vec2(4.0, 0.0), pos2(buttons_left - 4.0, header.bottom()));
-
-        if show_add {
-            let add = icon_button(ui, add_rect, Id::new(("mycelium-dock-add", area.id)), ("add", "+"), style).on_hover_text(t!("dock-add-editor"));
-            if let Some(tab) = egui::Popup::menu(&add).style(style.menu_style).show(|ui| viewer.add_menu(ui)).and_then(|r| r.inner) {
-                self.rt.ops.push(Op::Add { key, area: Some(area.id), tab });
-            }
+        // Пустое место заголовка: правая кнопка — меню области, двойной щелчок — развернуть,
+        // перетаскивание — перенести область в другое место или окно.
+        let head = ui.interact(header, Id::new(("forma-dock-header", area.id)), Sense::click_and_drag());
+        if head.drag_started() && self.idle() {
+            self.rt.drag = Some(Drag { src: key, area: area.id, title: viewer.title(&area.editor), pointer: None, released: false, size: rect.size() });
         }
-        let menu = icon_button(ui, menu_rect, Id::new(("mycelium-dock-menu", area.id)), ("more", "⋯"), style).on_hover_text(t!("dock-area-menu"));
-        egui::Popup::menu(&menu).style(style.menu_style).show(|ui| {
-            self.area_menu(ui, key, area, maximized, style, (!show_add).then_some(&mut *viewer));
+        if head.double_clicked() {
+            self.rt.ops.push(Op::ToggleMaximize { key, area: area.id });
+        }
+        egui::Popup::context_menu(&head).style(style.menu_style).show(|ui| {
+            self.header_menu(ui, key, area.id, maximized, style);
         });
 
-        // Вкладки.
-        let font = FontId::proportional(13.0);
-        let titles: Vec<(String, Option<(String, Color32)>, Id)> =
-            area.tabs.iter().map(|tab| (viewer.title(tab), viewer.icon(tab), viewer.id(tab))).collect();
-        let desired: Vec<f32> = titles
-            .iter()
-            .map(|(title, icon, _)| {
-                let text_w = ui.painter().layout_no_wrap(title.clone(), font.clone(), Color32::WHITE).size().x;
-                let icon_w = if icon.is_some() { 20.0 } else { 0.0 };
-                (12.0 + icon_w + text_w + 26.0).clamp(64.0, 240.0)
+        // Меню вида редактора — слева в заголовке, как в Blender.
+        let type_rect = Rect::from_min_size(pos2(header.left() + 10.0, header.top() + 4.0), vec2(38.0, HEADER_H - 8.0));
+        let type_resp = ui.interact(type_rect, Id::new(("forma-dock-type", area.id)), Sense::click());
+        let open = egui::Popup::is_id_open(&ctx, egui::Popup::default_response_id(&type_resp));
+        let hover_t = ctx.animate_bool_with_time(type_resp.id.with("hover"), type_resp.hovered() || open, 0.12);
+        if hover_t > 0.0 {
+            painter.rect_filled(type_rect, CornerRadius::same(6), style.hover_bg.gamma_multiply(hover_t));
+        }
+        let icon_rect = Rect::from_center_size(pos2(type_rect.left() + 13.0, type_rect.center().y), vec2(16.0, 16.0));
+        match viewer.icon(&area.editor) {
+            Some((name, color)) if (style.paint_icon)(&painter, icon_rect, &name, color) => {}
+            _ => {
+                painter.text(icon_rect.center(), Align2::CENTER_CENTER, "▦", FontId::proportional(14.0), style.text);
+            }
+        }
+        let chevron = Rect::from_center_size(pos2(type_rect.right() - 9.0, type_rect.center().y), vec2(10.0, 10.0));
+        let chevron_color = style.text_muted.lerp_to_gamma(style.text_strong, hover_t);
+        if !(style.paint_icon)(&painter, chevron, "chevron-down", chevron_color) {
+            painter.text(chevron.center(), Align2::CENTER_CENTER, "▾", FontId::proportional(11.0), chevron_color);
+        }
+        let type_resp = type_resp.on_hover_text(t!("dock-editor-type")).on_hover_cursor(CursorIcon::PointingHand);
+        let picked = egui::Popup::menu(&type_resp)
+            .style(style.menu_style)
+            .show(|ui| {
+                let groups = viewer.kinds();
+                let current = viewer.kind(&area.editor);
+                kind_menu(ui, &groups, Some(&current), style)
             })
-            .collect();
-        let plan = plan_tabs(&desired, area.active, tabs_rect.width());
-        let mut x = tabs_rect.left();
-        let mut tab_rects = Vec::with_capacity(titles.len());
-        for (i, (title, icon, tab_id)) in titles.iter().enumerate() {
-            let Some(w) = plan.widths[i] else {
-                // Спрятанная вкладка: пустой прямоугольник у края — по нему считается место броска.
-                let edge = if i < plan.first { tabs_rect.left() - 1.0 } else { header.right() + 1.0 };
-                tab_rects.push(Rect::from_min_size(pos2(edge, header.top() + 4.0), vec2(0.0, HEADER_H - 4.0)));
-                continue;
-            };
-            let r = Rect::from_min_max(pos2(x, header.top() + 4.0), pos2((x + w).min(tabs_rect.right()), header.bottom()));
-            x += w + 2.0;
-            tab_rects.push(r);
-            let id = tab_id.with("mycelium-dock-tab");
-            let active = i == area.active;
-            let dragging_this = self.rt.drag.as_ref().is_some_and(|d| d.src == key && d.area == area.id && d.index == i);
-            let resp = ui.interact(r, id, Sense::click_and_drag());
-            let (close_hit, elided) = paint_tab(ui, &resp, r, id, title, icon.as_ref(), active, dragging_this, style);
-            // У обрезанной вкладки полное название — во всплывающей подсказке.
-            let resp = if elided && self.rt.drag.is_none() { resp.on_hover_text(title) } else { resp };
-
-            if resp.drag_started() && self.rt.drag.is_none() {
-                self.rt.drag = Some(Drag {
-                    src: key,
-                    area: area.id,
-                    index: i,
-                    title: title.clone(),
-                    pointer: None,
-                    released: false,
-                    size: vec2(rect.width(), rect.height()),
-                });
+            .and_then(|r| r.inner);
+        if let Some(kind) = picked {
+            if kind != viewer.kind(&area.editor) {
+                viewer.switch(&mut area.editor, &kind);
             }
-            if resp.middle_clicked() || (resp.clicked() && close_hit) {
-                self.rt.ops.push(Op::Close { key, area: area.id, index: i });
-            } else if resp.double_clicked() {
-                self.rt.ops.push(Op::ToggleMaximize { key, area: area.id });
-            } else if resp.clicked() {
-                area.active = i;
-                self.rt.focused.insert(key, area.id);
-            }
-            egui::Popup::context_menu(&resp).style(style.menu_style).show(|ui| {
-                self.tab_menu(ui, key, area, i, maximized, style);
-            });
+            self.rt.focused.insert(key, area.id);
         }
 
-        // Не поместившиеся вкладки — в меню «»» справа от видимых.
-        if plan.hidden() > 0 {
-            let more_rect = Rect::from_center_size(pos2(x + 12.0, header.center().y + 2.0), vec2(24.0, 24.0));
-            let more = icon_button(ui, more_rect, Id::new(("mycelium-dock-more", area.id)), ("overflow", "»"), style).on_hover_text(t!("dock-more-tabs", count = plan.hidden()));
-            egui::Popup::menu(&more).style(style.menu_style).show(|ui| {
-                for (i, (title, icon, _)) in titles.iter().enumerate() {
-                    // Место под значок слева от названия; видимые вкладки — приглушённо.
-                    let color = if plan.widths[i].is_some() { style.text_muted } else { style.text };
-                    let resp = ui.add(egui::Button::new(egui::RichText::new(format!("      {title}")).color(color)).selected(i == area.active));
-                    if let Some((name, tint)) = icon {
-                        let r = Rect::from_center_size(resp.rect.left_center() + vec2(ui.spacing().button_padding.x + 8.0, 0.0), vec2(14.0, 14.0));
-                        (style.paint_icon)(ui.painter(), r, name, if plan.widths[i].is_some() { tint.gamma_multiply(0.6) } else { *tint });
-                    }
-                    if resp.clicked() {
-                        area.active = i;
-                        self.rt.focused.insert(key, area.id);
-                    }
-                }
-            });
+        // Своё содержимое заголовка — правее меню вида.
+        let content = Rect::from_min_max(pos2(type_rect.right() + 6.0, header.top()), pos2(header.right() - CORNER, header.bottom()));
+        if content.width() > 8.0 {
+            let mut child = ui.new_child(
+                UiBuilder::new()
+                    .max_rect(content)
+                    .id_salt(("forma-dock-head", area.id, editor_id))
+                    .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            child.set_clip_rect(content.intersect(ui.clip_rect()));
+            // Подписи не выделяются мышью: иначе за них не потянуть заголовок.
+            child.style_mut().interaction.selectable_labels = false;
+            viewer.header(&mut child, &mut area.editor);
         }
 
-        // Содержимое активной вкладки.
+        // Содержимое редактора.
         let mut child = ui.new_child(
             UiBuilder::new()
                 .max_rect(body)
-                .id_salt(("mycelium-dock-body", area.id))
+                .id_salt(("forma-dock-body", area.id, editor_id))
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
         child.set_clip_rect(body.intersect(ui.clip_rect()));
-        if let Some(tab) = area.tabs.get_mut(area.active) {
-            viewer.ui(&mut child, tab);
-        }
+        viewer.ui(&mut child, &mut area.editor);
 
-        frame.areas.push(AreaRects { id: area.id, header, body, tabs: tab_rects });
+        // Уголки — поверх всего, как в Blender. У развёрнутой области их нет.
+        if !maximized {
+            self.corners(ui, key, area.id, rect, style);
+        }
+        frame.areas.push(AreaRects { id: area.id, header, body });
     }
 
-    /// Меню области. `add` — в узкой области сюда переезжает меню кнопки «+».
-    fn area_menu(&mut self, ui: &mut Ui, key: SurfaceKey, area: &Area<T>, maximized: bool, style: &DockStyle, add: Option<&mut impl TabViewer<Tab = T>>) {
-        let id = area.id;
-        if let Some(viewer) = add {
-            let mut picked = None;
-            ui.menu_button(t!("dock-add-editor-button"), |ui| picked = viewer.add_menu(ui));
-            if let Some(tab) = picked {
-                self.rt.ops.push(Op::Add { key, area: Some(id), tab });
+    /// Четыре уголка области: за них тянут, чтобы разделить, объединить, поменять местами
+    /// (с Ctrl) или открыть копию в новом окне (с Shift).
+    fn corners(&mut self, ui: &mut Ui, key: SurfaceKey, area: AreaId, rect: Rect, style: &DockStyle) {
+        let idle = self.idle();
+        for (i, c) in [rect.left_top(), rect.right_top(), rect.left_bottom(), rect.right_bottom()].into_iter().enumerate() {
+            let inward = vec2(if c.x < rect.center().x { 1.0 } else { -1.0 }, if c.y < rect.center().y { 1.0 } else { -1.0 });
+            let id = Id::new(("forma-dock-corner", area, i));
+            let resp = ui.interact(Rect::from_two_pos(c, c + inward * CORNER), id, Sense::drag());
+            let active = self.rt.corner.as_ref().is_some_and(|g| g.area == area && g.corner == c);
+            let hot = (idle && resp.hovered()) || active;
+            if hot {
+                ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
             }
-            ui.separator();
+            let t = ui.ctx().animate_bool_with_time(id, hot, 0.12);
+            let color = style.text_muted.gamma_multiply(0.35).lerp_to_gamma(style.accent, t);
+            for k in [6.0, 10.0] {
+                let a = c + vec2(inward.x * k, inward.y * 2.5);
+                let b = c + vec2(inward.x * 2.5, inward.y * k);
+                ui.painter().line_segment([a, b], Stroke::new(1.0, color));
+            }
+            if idle && resp.drag_started() {
+                if ui.input(|i| i.modifiers.shift) {
+                    self.rt.ops.push(Op::DuplicateWindow { key, area, size: rect.size() });
+                } else {
+                    self.rt.corner = Some(CornerDrag { key, area, corner: c, dir: None, action: CornerAction::None });
+                }
+            }
+            if idle {
+                resp.on_hover_text(t!("dock-corner-hint"));
+            }
         }
-        if ui.button(t!("dock-split-right")).clicked() {
-            self.rt.ops.push(Op::SplitDuplicate { key, area: id, zone: Zone::Right });
+    }
+
+    /// Пункты «Вертикальное / горизонтальное разделение»: дальше линия идёт за курсором.
+    fn split_items(&mut self, ui: &mut Ui, key: SurfaceKey) {
+        if ui.button(t!("dock-split-vertical")).clicked() {
+            self.rt.pick = Some(SplitPick { key, dir: SplitDir::Horizontal });
         }
-        if ui.button(t!("dock-split-down")).clicked() {
-            self.rt.ops.push(Op::SplitDuplicate { key, area: id, zone: Zone::Bottom });
+        if ui.button(t!("dock-split-horizontal")).clicked() {
+            self.rt.pick = Some(SplitPick { key, dir: SplitDir::Vertical });
+        }
+    }
+
+    /// Меню границы между областями (правая кнопка): разделить, объединить, поменять местами.
+    fn border_menu(&mut self, ui: &mut Ui, key: SurfaceKey, dir: SplitDir, first: AreaId, second: AreaId, both_areas: bool) {
+        self.split_items(ui, key);
+        ui.separator();
+        let (into_first, into_second) = match dir {
+            SplitDir::Horizontal => (t!("dock-join-left"), t!("dock-join-right")),
+            SplitDir::Vertical => (t!("dock-join-up"), t!("dock-join-down")),
+        };
+        for (label, keep, remove) in [(into_first, first, second), (into_second, second, first)] {
+            let resp = ui.add_enabled(both_areas, egui::Button::new(label)).on_disabled_hover_text(t!("dock-join-unavailable"));
+            if resp.clicked() {
+                self.rt.ops.push(Op::Join { key, keep, remove });
+            }
         }
         ui.separator();
+        if ui.button(t!("dock-swap")).clicked() {
+            self.rt.ops.push(Op::SwapSplit { key, first, second });
+        }
+    }
+
+    /// Меню заголовка области (правая кнопка).
+    fn header_menu(&mut self, ui: &mut Ui, key: SurfaceKey, area: AreaId, maximized: bool, style: &DockStyle) {
+        if !maximized {
+            self.split_items(ui, key);
+            ui.separator();
+        }
         let max_label = if maximized { t!("dock-restore") } else { t!("dock-maximize") };
         if ui.add(egui::Button::new(max_label).shortcut_text(style.maximize_text.as_str())).clicked() {
-            self.rt.ops.push(Op::ToggleMaximize { key, area: id });
+            self.rt.ops.push(Op::ToggleMaximize { key, area });
         }
+        let size = self.area_size(key, area);
         match key {
             SurfaceKey::Main => {
                 if ui.button(t!("dock-detach")).clicked() {
-                    let size = vec2(ui.ctx().content_rect().width() * 0.5, ui.ctx().content_rect().height() * 0.6);
-                    self.rt.ops.push(Op::Detach { key, area: id, index: area.active, pos: None, size });
+                    self.rt.ops.push(Op::Detach { key, area, pos: None, size });
                 }
             }
             SurfaceKey::Window(w) => {
@@ -948,180 +1291,66 @@ impl<T> DockState<T> {
                     self.rt.ops.push(Op::Return(w));
                 }
             }
+        }
+        if ui.button(t!("dock-duplicate-window")).clicked() {
+            self.rt.ops.push(Op::DuplicateWindow { key, area, size });
         }
         ui.separator();
         if ui.button(t!("dock-close-area")).clicked() {
-            self.rt.ops.push(Op::CloseArea { key, area: id });
+            self.rt.ops.push(Op::CloseArea { key, area });
         }
     }
+}
 
-    fn tab_menu(&mut self, ui: &mut Ui, key: SurfaceKey, area: &Area<T>, index: usize, maximized: bool, style: &DockStyle) {
-        let id = area.id;
-        if ui.button(t!("dock-close")).clicked() {
-            self.rt.ops.push(Op::Close { key, area: id, index });
-        }
-        if ui.add_enabled(area.tabs.len() > 1, egui::Button::new(t!("dock-close-others"))).clicked() {
-            self.rt.ops.push(Op::CloseOthers { key, area: id, index });
-        }
-        ui.separator();
-        let several = area.tabs.len() > 1;
-        if ui.add_enabled(several, egui::Button::new(t!("dock-move-right"))).clicked() {
-            self.rt.ops.push(Op::MoveToSplit { key, area: id, index, zone: Zone::Right });
-        }
-        if ui.add_enabled(several, egui::Button::new(t!("dock-move-down"))).clicked() {
-            self.rt.ops.push(Op::MoveToSplit { key, area: id, index, zone: Zone::Bottom });
-        }
-        ui.separator();
-        match key {
-            SurfaceKey::Main => {
-                if ui.button(t!("dock-detach-tab")).clicked() {
-                    let size = vec2(ui.ctx().content_rect().width() * 0.5, ui.ctx().content_rect().height() * 0.6);
-                    self.rt.ops.push(Op::Detach { key, area: id, index, pos: None, size });
-                }
+/// Меню выбора вида редактора: столбцы-группы, в каждом — значок, название и сочетание.
+fn kind_menu(ui: &mut Ui, groups: &[KindGroup], current: Option<&str>, style: &DockStyle) -> Option<String> {
+    const COLUMN_W: f32 = 200.0;
+    let mut picked = None;
+    ui.horizontal_top(|ui| {
+        for (gi, group) in groups.iter().enumerate() {
+            if gi > 0 {
+                ui.add_space(8.0);
             }
-            SurfaceKey::Window(w) => {
-                if ui.button(t!("dock-attach-window")).clicked() {
-                    self.rt.ops.push(Op::Return(w));
-                }
-            }
+            ui.vertical(|ui| {
+                ui.set_width(COLUMN_W);
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new(&group.title).size(11.5).color(style.text_muted));
+                ui.add_space(2.0);
+                ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
+                    for kind in &group.kinds {
+                        let selected = current == Some(kind.id.as_str());
+                        // Место под значок слева от названия.
+                        let button = egui::Button::new(format!("      {}", kind.title)).shortcut_text(kind.shortcut.as_str()).selected(selected);
+                        let resp = ui.add(button);
+                        let r = Rect::from_center_size(resp.rect.left_center() + vec2(ui.spacing().button_padding.x + 8.0, 0.0), vec2(15.0, 15.0));
+                        let color = if selected { style.accent } else { style.text };
+                        (style.paint_icon)(ui.painter(), r, &kind.icon, color);
+                        if resp.clicked() {
+                            picked = Some(kind.id.clone());
+                        }
+                    }
+                });
+            });
         }
-        let max_label = if maximized { t!("dock-restore") } else { t!("dock-maximize") };
-        if ui.add(egui::Button::new(max_label).shortcut_text(style.maximize_text.as_str())).clicked() {
-            self.rt.ops.push(Op::ToggleMaximize { key, area: id });
-        }
-    }
+    });
+    picked
 }
 
-/// Небольшая кнопка-значок в строке вкладок: имя значка и символ на случай, если значка нет.
-fn icon_button(ui: &mut Ui, rect: Rect, id: Id, (name, glyph): (&str, &str), style: &DockStyle) -> egui::Response {
-    let resp = ui.interact(rect, id, Sense::click());
-    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&resp));
-    let t = ui.ctx().animate_bool_with_time(id.with("hover"), resp.hovered() || open, 0.12);
-    if t > 0.0 {
-        ui.painter().rect_filled(rect, CornerRadius::same(6), style.hover_bg.gamma_multiply(t));
-    }
-    let color = style.text_muted.lerp_to_gamma(style.text_strong, t);
-    if !(style.paint_icon)(ui.painter(), Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), name, color) {
-        ui.painter().text(rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(16.0), color);
-    }
-    resp.on_hover_cursor(CursorIcon::PointingHand)
-}
-
-/// Как разложить вкладки в строке: ширина каждой видимой (`None` — вкладка спрятана
-/// в меню «»») и номер первой видимой.
-#[derive(Debug, PartialEq)]
-struct TabPlan {
-    widths: Vec<Option<f32>>,
-    first: usize,
-}
-
-impl TabPlan {
-    fn hidden(&self) -> usize {
-        self.widths.iter().filter(|w| w.is_none()).count()
-    }
-}
-
-/// Вкладки желаемой ширины `desired` в строке шириной `avail`: если не помещаются, сжимаются
-/// поровну, а если и так тесно — видны только соседние с активной, остальные уходят в меню.
-fn plan_tabs(desired: &[f32], active: usize, avail: f32) -> TabPlan {
-    const GAP: f32 = 2.0;
-    let n = desired.len();
-    if n == 0 {
-        return TabPlan { widths: Vec::new(), first: 0 };
-    }
-    let gaps = GAP * (n - 1) as f32;
-    let sum: f32 = desired.iter().sum();
-    if sum + gaps <= avail {
-        return TabPlan { widths: desired.iter().map(|w| Some(*w)).collect(), first: 0 };
-    }
-    let scale = ((avail - gaps) / sum).max(0.0);
-    let shrunk: Vec<f32> = desired.iter().map(|d| (d * scale).max(MIN_TAB.min(*d))).collect();
-    if shrunk.iter().sum::<f32>() + gaps <= avail + 0.5 {
-        return TabPlan { widths: shrunk.into_iter().map(Some).collect(), first: 0 };
-    }
-    // Место под кнопку «»» и столько вкладок наименьшей ширины, сколько влезет (хотя бы одна).
-    let room = (avail - 28.0).max(0.0);
-    let k = (((room + GAP) / (MIN_TAB + GAP)).floor() as usize).clamp(1, n);
-    let active = active.min(n.saturating_sub(1));
-    let first = if active < k { 0 } else { active + 1 - k };
-    let w = ((room - GAP * (k - 1) as f32) / k as f32).max(0.0);
-    let widths = (0..n).map(|i| (first..first + k).contains(&i).then_some(w)).collect();
-    TabPlan { widths, first }
-}
-
-/// Название вкладки в одну строку не шире `max_width`, с «…» на конце, если не влезло.
-fn elided_title(ui: &Ui, title: &str, color: Color32, max_width: f32) -> Arc<egui::Galley> {
-    let mut job = egui::text::LayoutJob::simple_singleline(title.to_owned(), FontId::proportional(13.0), color);
-    job.wrap = egui::text::TextWrapping::truncate_at_width(max_width.max(0.0));
-    ui.painter().layout_job(job)
-}
-
-/// Рисует вкладку. Возвращает, наведён ли курсор на крестик закрытия и обрезано ли название.
-#[allow(clippy::too_many_arguments)]
-fn paint_tab(
-    ui: &Ui,
-    resp: &egui::Response,
-    rect: Rect,
-    id: Id,
-    title: &str,
-    icon: Option<&(String, Color32)>,
-    active: bool,
-    dragging: bool,
-    style: &DockStyle,
-) -> (bool, bool) {
-    let ctx = ui.ctx();
-    let a = ctx.animate_bool_with_time(id.with("active"), active, 0.18);
-    let hover = ctx.animate_bool_with_time(id.with("hover"), resp.hovered(), 0.12);
-    let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
-    let fade = if dragging { 0.45 } else { 1.0 };
-
-    if hover > 0.0 && !active {
-        painter.rect_filled(rect.shrink2(vec2(1.0, 2.0)), CornerRadius::same(6), style.hover_bg.gamma_multiply(hover * (1.0 - a)));
-    }
-    if a > 0.0 {
-        painter.rect_filled(rect, CornerRadius { nw: 7, ne: 7, sw: 0, se: 0 }, style.area_bg.gamma_multiply(a));
-        // Акцентная полоска сверху «вырастает» из центра.
-        let half = (rect.width() / 2.0 - 8.0).max(0.0) * a;
-        painter.hline(rect.center().x - half..=rect.center().x + half, rect.top() + 1.0, Stroke::new(2.0, style.accent));
-    }
-
-    let close_rect = Rect::from_center_size(pos2(rect.right() - 13.0, rect.center().y), Vec2::splat(16.0));
-    // Совсем узкой вкладке крестик не нужен: закрыть её можно средней кнопкой или из меню.
-    let closable = rect.width() >= 44.0;
-    let mut x = rect.left() + 10.0;
-    if let Some((name, color)) = icon {
-        let r = Rect::from_center_size(pos2(x + 7.0, rect.center().y), vec2(14.0, 14.0));
-        if !(style.paint_icon)(&painter, r, name, color.gamma_multiply(fade)) {
-            painter.text(r.center(), Align2::CENTER_CENTER, name, FontId::proportional(13.0), color.gamma_multiply(fade));
-        }
-        x += 20.0;
-    }
-    let text_color = style.text_muted.lerp_to_gamma(style.text_strong, a.max(hover * 0.6)).gamma_multiply(fade);
-    let text_right = if closable { close_rect.left() - 3.0 } else { rect.right() - 6.0 };
-    let room = text_right - x;
-    let elided = if room >= 12.0 {
-        let galley = elided_title(ui, title, text_color, room);
-        let elided = galley.elided;
-        painter.galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley, text_color);
-        elided
-    } else {
-        true
+/// Линия будущего разреза в промежутке `sep`.
+fn paint_cut(painter: &egui::Painter, sep: Rect, dir: SplitDir, style: &DockStyle) {
+    let line = match dir {
+        SplitDir::Horizontal => Rect::from_center_size(sep.center(), vec2(2.0, sep.height())),
+        SplitDir::Vertical => Rect::from_center_size(sep.center(), vec2(sep.width(), 2.0)),
     };
+    painter.rect_filled(line, CornerRadius::same(1), style.accent);
+}
 
-    let on_close = closable && resp.hover_pos().is_some_and(|p| close_rect.contains(p));
-    if closable && (resp.hovered() || active) {
-        if on_close {
-            painter.rect_filled(close_rect, CornerRadius::same(4), style.hover_bg);
-        }
-        let color = style.text_muted.gamma_multiply(a.max(hover) * fade);
-        if !(style.paint_icon)(&painter, close_rect.shrink(3.0), "close", color) {
-            painter.text(close_rect.center(), Align2::CENTER_CENTER, "×", FontId::proportional(14.0), color);
-        }
-    }
-    if resp.hovered() {
-        ctx.set_cursor_icon(CursorIcon::PointingHand);
-    }
-    (on_close, elided)
+/// Подсказка внизу окна, пока идёт жест.
+fn paint_hint(painter: &egui::Painter, surface_rect: Rect, text: &str, style: &DockStyle) {
+    let galley = painter.layout_no_wrap(text.to_owned(), FontId::proportional(12.5), style.text_strong);
+    let r = Rect::from_center_size(pos2(surface_rect.center().x, surface_rect.bottom() - 26.0), galley.size() + vec2(24.0, 12.0));
+    painter.rect(r, CornerRadius::same(8), style.header_bg, Stroke::new(1.0, style.border), StrokeKind::Inside);
+    painter.galley(r.min + vec2(12.0, 6.0), galley, style.text_strong);
 }
 
 #[cfg(test)]
@@ -1130,11 +1359,7 @@ mod tests {
 
     fn area_rects(id: u64, body: Rect) -> AreaRects {
         let header = Rect::from_min_size(body.min - vec2(0.0, HEADER_H), vec2(body.width(), HEADER_H));
-        let tabs = vec![
-            Rect::from_min_size(header.min, vec2(100.0, HEADER_H)),
-            Rect::from_min_size(header.min + vec2(100.0, 0.0), vec2(100.0, HEADER_H)),
-        ];
-        AreaRects { id: AreaId(id), header, body, tabs }
+        AreaRects { id: AreaId(id), header, body }
     }
 
     #[test]
@@ -1165,52 +1390,94 @@ mod tests {
         assert_eq!(compute_target(&rects, pos2(1500.0, 400.0)), Target::NewWindow(pos2(1500.0, 400.0)));
         assert_eq!(
             compute_target(&rects, pos2(160.0, 20.0)),
-            Target::Area { key: SurfaceKey::Main, area: AreaId(1), zone: Zone::Tab(1) },
-            "над строкой вкладок — вставка между вкладками"
+            Target::Area { key: SurfaceKey::Main, area: AreaId(1), zone: Zone::Top },
+            "заголовок — часть области"
         );
         assert_eq!(compute_target(&rects, pos2(2.0, 2.0)), Target::Nothing, "над рамкой окна — ничего");
     }
 
-    #[test]
-    fn tabs_shrink_then_overflow_keeping_active_visible() {
-        let desired = [120.0, 120.0, 120.0, 120.0];
-        let all = plan_tabs(&desired, 0, 600.0);
-        assert_eq!(all.hidden(), 0);
-        assert_eq!(all.widths[0], Some(120.0));
-
-        let shrunk = plan_tabs(&desired, 0, 400.0);
-        assert_eq!(shrunk.hidden(), 0, "сначала вкладки сжимаются");
-        assert!(shrunk.widths.iter().all(|w| w.is_some_and(|w| (MIN_TAB..120.0).contains(&w))));
-
-        let tight = plan_tabs(&desired, 3, 200.0);
-        assert!(tight.hidden() > 0, "дальше лишние уходят в меню");
-        assert!(tight.widths[3].is_some(), "активная вкладка видна");
-        assert_eq!(tight.first + tight.widths.iter().flatten().count(), 4, "видны соседние с активной");
-
-        let tiny = plan_tabs(&desired, 1, 30.0);
-        assert_eq!(tiny.widths.iter().flatten().count(), 1, "хотя бы одна вкладка видна всегда");
-        assert!(tiny.widths[1].is_some());
-
-        assert_eq!(plan_tabs(&[], 0, -10.0).hidden(), 0, "пустая область при нулевой ширине не падает");
-        assert_eq!(plan_tabs(&desired, 0, -10.0).widths.iter().flatten().count(), 1);
+    /// Две области рядом: 1 слева (0..400), 2 справа (404..800), обе высотой 600.
+    fn side_by_side() -> Vec<AreaRects> {
+        vec![
+            area_rects(1, Rect::from_min_max(pos2(0.0, HEADER_H), pos2(400.0, 600.0))),
+            area_rects(2, Rect::from_min_max(pos2(404.0, HEADER_H), pos2(800.0, 600.0))),
+        ]
     }
 
-    struct V;
-    impl TabViewer for V {
-        type Tab = &'static str;
-        fn title(&mut self, tab: &Self::Tab) -> String {
-            tab.to_string()
+    #[test]
+    fn corner_drag_inside_splits_toward_the_corner() {
+        let areas = side_by_side();
+        let corner = pos2(400.0, 600.0); // правый нижний уголок первой области
+        let mut dir = None;
+        assert_eq!(corner_action(&areas, AreaId(1), corner, pos2(396.0, 597.0), &mut dir, &[], false), CornerAction::None, "мышь ещё у уголка");
+        assert_eq!(dir, None);
+
+        // Повели влево — вертикальная линия, новая часть справа (со стороны уголка).
+        let a = corner_action(&areas, AreaId(1), corner, pos2(300.0, 590.0), &mut dir, &[], false);
+        assert_eq!(dir, Some(SplitDir::Horizontal));
+        let CornerAction::Split { zone, ratio } = a else { panic!("{a:?}") };
+        assert_eq!(zone, Zone::Right);
+        assert!((ratio - 0.25).abs() < 0.01, "новая часть — от линии до уголка: {ratio}");
+
+        // Направление запомнилось: дальше вверх — всё ещё вертикальная линия.
+        assert!(matches!(corner_action(&areas, AreaId(1), corner, pos2(200.0, 100.0), &mut dir, &[], false), CornerAction::Split { zone: Zone::Right, .. }));
+        // Слишком близко к краю — части вышли бы крошечными.
+        assert_eq!(corner_action(&areas, AreaId(1), corner, pos2(20.0, 300.0), &mut dir, &[], false), CornerAction::None);
+
+        // Сверху вниз от верхнего левого уголка — горизонтальная линия, новая часть сверху.
+        let mut dir = None;
+        let a = corner_action(&areas, AreaId(1), pos2(0.0, 0.0), pos2(10.0, 200.0), &mut dir, &[], false);
+        assert_eq!(dir, Some(SplitDir::Vertical));
+        assert!(matches!(a, CornerAction::Split { zone: Zone::Top, .. }), "{a:?}");
+    }
+
+    #[test]
+    fn corner_drag_into_another_area() {
+        let areas = side_by_side();
+        let corner = pos2(400.0, 0.0);
+        let mut dir = None;
+        assert_eq!(corner_action(&areas, AreaId(1), corner, pos2(600.0, 300.0), &mut dir, &[AreaId(2)], false), CornerAction::Join(AreaId(2)));
+        assert_eq!(corner_action(&areas, AreaId(1), corner, pos2(600.0, 300.0), &mut dir, &[AreaId(2)], true), CornerAction::Swap(AreaId(2)), "Ctrl — обмен");
+        assert_eq!(corner_action(&areas, AreaId(1), corner, pos2(600.0, 300.0), &mut dir, &[], false), CornerAction::Dock(AreaId(2), Zone::Center), "не сосед — перенос");
+        assert_eq!(corner_action(&areas, AreaId(1), corner, pos2(780.0, 300.0), &mut dir, &[], false), CornerAction::Dock(AreaId(2), Zone::Right));
+        assert_eq!(corner_action(&areas, AreaId(1), corner, pos2(402.0, 300.0), &mut dir, &[AreaId(2)], false), CornerAction::None, "в зазоре — ничего");
+    }
+
+    struct V {
+        closed: Vec<&'static str>,
+    }
+    impl EditorViewer for V {
+        type Editor = &'static str;
+        fn kinds(&mut self) -> Vec<KindGroup> {
+            Vec::new()
         }
-        fn id(&mut self, tab: &Self::Tab) -> Id {
-            Id::new(tab)
+        fn kind(&mut self, editor: &Self::Editor) -> String {
+            editor.to_string()
         }
-        fn ui(&mut self, _ui: &mut Ui, _tab: &mut Self::Tab) {}
-        fn add_menu(&mut self, _ui: &mut Ui) -> Option<Self::Tab> {
-            None
+        fn create(&mut self, kind: &str) -> Option<Self::Editor> {
+            (kind == "консоль").then_some("консоль")
         }
-        fn duplicate(&mut self, tab: &Self::Tab) -> Self::Tab {
-            tab
+        fn title(&mut self, editor: &Self::Editor) -> String {
+            editor.to_string()
         }
+        fn id(&mut self, editor: &Self::Editor) -> Id {
+            Id::new(editor)
+        }
+        fn ui(&mut self, _ui: &mut Ui, _editor: &mut Self::Editor) {}
+        fn duplicate(&mut self, editor: &Self::Editor) -> Self::Editor {
+            editor
+        }
+        fn on_close(&mut self, editor: Self::Editor) {
+            self.closed.push(editor);
+        }
+    }
+
+    fn v() -> V {
+        V { closed: Vec::new() }
+    }
+
+    fn editors(s: &Surface<&'static str>) -> Vec<&'static str> {
+        s.editors().copied().collect()
     }
 
     /// Прямоугольники прошлых кадров не должны копиться: иначе цель броска считалась
@@ -1223,7 +1490,7 @@ mod tests {
         for frame in 0..3 {
             let window = Rect::from_min_size(pos2(frame as f32 * 100.0, 0.0), vec2(800.0, 600.0));
             dock.rt.rects.push(SurfaceRects { key: SurfaceKey::Main, window, areas: Vec::new() });
-            dock.finish(&ctx, &mut main, &mut V);
+            dock.finish(&ctx, &mut main, &mut v());
         }
         assert!(dock.rt.rects.is_empty());
         assert_eq!(dock.rt.prev_rects.len(), 1);
@@ -1231,36 +1498,75 @@ mod tests {
     }
 
     #[test]
-    fn moving_tabs_between_surfaces_and_windows() {
+    fn split_join_swap_and_replace() {
         let ctx = Context::default();
         let mut dock: DockState<&'static str> = DockState::default();
         dock.reserve_ids(10);
-        let mut main = Surface::new(Node::area(AreaId(1), vec!["код", "консоль"]));
+        let mut main = Surface::new(Node::area(AreaId(1), "код"));
+        let mut viewer = v();
+
+        dock.rt.ops.push(Op::Split { key: SurfaceKey::Main, area: AreaId(1), zone: Zone::Right, ratio: 0.3 });
+        dock.finish(&ctx, &mut main, &mut viewer);
+        assert_eq!(editors(&main), vec!["код", "код"], "копия редактора в новой части");
+        let new = main.areas()[1].id;
+        assert_eq!(dock.focused(SurfaceKey::Main), Some(new));
+
+        dock.rt.ops.push(Op::Join { key: SurfaceKey::Main, keep: AreaId(1), remove: new });
+        dock.finish(&ctx, &mut main, &mut viewer);
+        assert_eq!(main.count(), 1);
+        assert_eq!(viewer.closed, vec!["код"], "объединённый редактор закрыт");
+
+        // В пустое окно — новый редактор; потом перенос на место другого.
+        let mut empty = Surface::default();
+        dock.rt.ops.push(Op::Create { key: SurfaceKey::Main, kind: "консоль".into() });
+        dock.finish(&ctx, &mut empty, &mut viewer);
+        assert_eq!(editors(&empty), vec!["консоль"]);
+
+        main.split_area(AreaId(1), Zone::Bottom, Area::new(AreaId(50), "консоль"), 0.3).unwrap();
+        dock.rt.ops.push(Op::Swap { key: SurfaceKey::Main, a: AreaId(1), b: AreaId(50) });
+        dock.finish(&ctx, &mut main, &mut viewer);
+        assert_eq!(editors(&main), vec!["консоль", "код"]);
+
+        dock.rt.ops.push(Op::Move { from: (SurfaceKey::Main, AreaId(50)), to: Target::Area { key: SurfaceKey::Main, area: AreaId(1), zone: Zone::Center } });
+        dock.finish(&ctx, &mut main, &mut viewer);
+        assert_eq!(editors(&main), vec!["код"], "перенесённый редактор занял место другого");
+        assert_eq!(viewer.closed, vec!["код", "консоль"]);
+    }
+
+    #[test]
+    fn moving_areas_between_surfaces_and_windows() {
+        let ctx = Context::default();
+        let mut dock: DockState<&'static str> = DockState::default();
+        dock.reserve_ids(10);
+        let mut main = Surface::new(Node::split(SplitDir::Horizontal, 0.5, Node::area(AreaId(1), "код"), Node::area(AreaId(2), "консоль")));
+        let mut viewer = v();
 
         // Вынести «консоль» в отдельное окно.
-        dock.rt.ops.push(Op::Detach { key: SurfaceKey::Main, area: AreaId(1), index: 1, pos: None, size: vec2(500.0, 400.0) });
-        dock.finish(&ctx, &mut main, &mut V);
+        dock.rt.ops.push(Op::Detach { key: SurfaceKey::Main, area: AreaId(2), pos: None, size: vec2(500.0, 400.0) });
+        dock.finish(&ctx, &mut main, &mut viewer);
         assert_eq!(dock.windows.len(), 1);
-        assert_eq!(main.tab_count(), 1);
+        assert_eq!(editors(&main), vec!["код"]);
         let win = dock.windows[0].id;
 
-        // Перетащить её обратно справа от «кода».
+        // Перетащить её обратно под «код».
         let win_area = dock.windows[0].surface.first_area_id().unwrap();
         dock.rt.ops.push(Op::Move {
-            from: (SurfaceKey::Window(win), win_area, 0),
-            to: Target::Area { key: SurfaceKey::Main, area: AreaId(1), zone: Zone::Right },
+            from: (SurfaceKey::Window(win), win_area),
+            to: Target::Area { key: SurfaceKey::Main, area: AreaId(1), zone: Zone::Bottom },
         });
-        dock.finish(&ctx, &mut main, &mut V);
+        dock.finish(&ctx, &mut main, &mut viewer);
         assert!(dock.windows.is_empty(), "опустевшее окно закрывается");
-        assert_eq!(main.areas().len(), 2);
+        assert_eq!(editors(&main), vec!["код", "консоль"]);
 
-        // Снова вынести и закрыть окно — вкладка возвращается.
-        let right = main.areas()[1].id;
-        dock.rt.ops.push(Op::Detach { key: SurfaceKey::Main, area: right, index: 0, pos: None, size: DEFAULT_WINDOW });
-        dock.finish(&ctx, &mut main, &mut V);
+        // Копия в новом окне, потом все окна — обратно.
+        dock.rt.ops.push(Op::DuplicateWindow { key: SurfaceKey::Main, area: AreaId(1), size: DEFAULT_WINDOW });
+        dock.finish(&ctx, &mut main, &mut viewer);
+        assert_eq!(dock.windows.len(), 1);
+        assert_eq!(main.count(), 2, "копия не убирает область");
         dock.return_all();
-        dock.finish(&ctx, &mut main, &mut V);
+        dock.finish(&ctx, &mut main, &mut viewer);
         assert!(dock.windows.is_empty());
-        assert_eq!(main.tab_count(), 2);
+        assert_eq!(main.count(), 3);
+        assert!(viewer.closed.is_empty(), "при переносах ничего не закрывается");
     }
 }

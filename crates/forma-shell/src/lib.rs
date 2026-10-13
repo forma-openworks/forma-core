@@ -10,8 +10,8 @@
 //! - фоновая картинка темы ([`look`]), подсветка кода цветами темы ([`highlight`]);
 //! - общие действия и их сочетания ([`actions`]), общие плагины ([`plugins`]).
 //!
-//! Программа описывает себя в [`Spec`], свои настройки — через [`AppSettings`], вкладки и
-//! встроенные рабочие пространства — через [`ShellTab`] и [`Builtin`].
+//! Программа описывает себя в [`Spec`], свои настройки — через [`AppSettings`], редакторы
+//! областей и встроенные рабочие пространства — через [`ShellEditor`] и [`Builtin`].
 
 pub mod actions;
 pub mod caption;
@@ -26,7 +26,7 @@ pub mod workspace;
 
 pub use settings::{AppSettings, PlatformSettings};
 pub use shell::{Shell, ShellCmd, Spec, Toast, font_choice, open_folder, reveal_in_explorer};
-pub use workspace::{Builtin, Ids, Layout, ShellTab, Workspace};
+pub use workspace::{Builtin, Ids, Layout, ShellEditor, Workspace};
 
 use eframe::{egui, egui_wgpu, wgpu};
 use forma_actions::Registry;

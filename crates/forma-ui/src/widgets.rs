@@ -152,6 +152,52 @@ pub fn centered_text(ui: &mut Ui, text: &str, size: f32, color: Color32, max_wid
     });
 }
 
+/// Вкладка документа в заголовке области, как в IDE от JetBrains: значок, название и
+/// крестик, а у несохранённого документа, пока курсор не над вкладкой, — точка.
+/// Возвращает ответ и наведён ли курсор на крестик.
+pub fn doc_tab(ui: &mut Ui, pal: &Palette, icon: &str, title: &str, active: bool, dirty: bool) -> (egui::Response, bool) {
+    let text_color = if active { pal.tab_active_text } else { pal.tab_text };
+    let galley = ui.painter().layout_no_wrap(title.to_owned(), FontId::proportional(13.0), text_color);
+    let width = 8.0 + 14.0 + 6.0 + galley.size().x + 6.0 + 16.0 + 6.0;
+    let height = ui.available_height().clamp(22.0, 30.0);
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    let painter = ui.painter_at(rect);
+    let r = rect.shrink2(vec2(0.0, 3.0));
+    let hovered = resp.hovered();
+    if active {
+        painter.rect_filled(r, CornerRadius::same(6), pal.tab_hover.gamma_multiply(0.7));
+        painter.hline(r.left() + 6.0..=r.right() - 6.0, r.bottom() - 1.0, Stroke::new(2.0, pal.tab_indicator));
+    } else if hovered {
+        painter.rect_filled(r, CornerRadius::same(6), pal.tab_hover);
+    }
+    let icon_rect = Rect::from_center_size(pos2(r.left() + 15.0, r.center().y), vec2(14.0, 14.0));
+    crate::icons::paint(&painter, icon_rect, icon, pal.text_muted);
+    painter.galley(pos2(icon_rect.right() + 6.0, r.center().y - galley.size().y / 2.0), galley, text_color);
+
+    let close = Rect::from_center_size(pos2(r.right() - 14.0, r.center().y), vec2(16.0, 16.0));
+    let on_close = resp.hover_pos().is_some_and(|p| close.contains(p));
+    if hovered || (active && !dirty) {
+        if on_close {
+            painter.rect_filled(close, CornerRadius::same(4), pal.tab_hover);
+        }
+        crate::icons::paint(&painter, close.shrink(3.0), "close", if on_close { pal.tab_active_text } else { pal.tab_text });
+    } else if dirty {
+        painter.circle_filled(close.center(), 3.5, pal.accent);
+    }
+    (resp.on_hover_cursor(CursorIcon::PointingHand), on_close)
+}
+
+/// Небольшая кнопка-значок в заголовке области.
+pub fn header_button(ui: &mut Ui, pal: &Palette, icon: &str) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, CornerRadius::same(5), pal.tab_hover);
+    }
+    let color = if resp.hovered() { pal.tab_active_text } else { pal.tab_text };
+    crate::icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(14.0, 14.0)), icon, color);
+    resp
+}
+
 /// Ширина переключателя-сегментов (без растягивания на всю ширину).
 pub fn segmented_width(ui: &Ui, labels: &[&str]) -> f32 {
     let font = FontId::proportional(13.0);

@@ -426,13 +426,18 @@ mod tests {
 
     #[test]
     fn russian_plurals() {
-        let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        set_language("ru");
-        assert_eq!(t!("dock-more-tabs", count = 1), "Ещё 1 вкладка");
-        assert_eq!(t!("dock-more-tabs", count = 3), "Ещё 3 вкладки");
-        assert_eq!(t!("dock-more-tabs", count = 5), "Ещё 5 вкладок");
-        assert_eq!(t!("dock-more-tabs", count = 21), "Ещё 21 вкладка");
-        set_language("en");
+        let mut bundle = new_bundle("ru");
+        let source = "windows = { $count ->\n    [one] { $count } окно\n    [few] { $count } окна\n   *[many] { $count } окон\n}\n";
+        add_source(&mut bundle, "ru", "test", source.to_owned());
+        let say = |count: i64| {
+            let mut args = fluent_bundle::FluentArgs::new();
+            args.set("count", count);
+            format_in(&bundle, "windows", Some(&args)).expect("строка есть")
+        };
+        assert_eq!(say(1), "1 окно");
+        assert_eq!(say(3), "3 окна");
+        assert_eq!(say(5), "5 окон");
+        assert_eq!(say(21), "21 окно");
     }
 
     #[test]

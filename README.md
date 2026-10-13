@@ -22,7 +22,7 @@
 
 ### What it is
 
-Forma Core is the base that FORMA desktop apps are built on. It gives an app its window with its own frame, a layout of areas and tabs in the spirit of Blender, workspaces, themes and fonts, settings in the spirit of JetBrains IDEs, a keymap and Find Action, plugins and translations. An app brings only its own work, and every improvement to the core reaches all apps at once.
+Forma Core is the base that FORMA desktop apps are built on. It gives an app its window with its own frame, a layout of areas in the spirit of Blender (one editor per area, an editor-type menu, split and join by dragging area corners), workspaces, themes and fonts, settings in the spirit of JetBrains IDEs, a keymap and Find Action, plugins and translations. An app brings only its own work, and every improvement to the core reaches all apps at once.
 
 Apps built on Forma Core:
 
@@ -35,7 +35,7 @@ Apps built on Forma Core:
 | Crate | What it does |
 |---|---|
 | `forma-shell` | The app shell: window frame, menus, workspaces, status bar, welcome screen, settings, Find Action, plugins and themes. An app describes itself with a `Spec` and starts with `forma_shell::run` |
-| `forma-layout` | The composable UI: area tree, tabs, drag and drop, separate OS windows |
+| `forma-layout` | The composable UI: area tree with one editor per area, editor-type menu, corner gestures, separate OS windows |
 | `forma-ui` | The theme engine, icons, fonts, widgets, the settings window and its pages, theme tools. Ships the Mycelium Dark and Light themes (`forma_ui::theme::MYCELIUM_THEMES`) |
 | `forma-actions` | Actions and the keymap |
 | `forma-settings` | Settings components, their files, export and import |
@@ -84,7 +84,7 @@ Forma Core is part of FORMA. Idea and design: Holo. The code is written entirely
 
 ### Что это
 
-Forma Core — ядро, на котором построены программы FORMA. Она даёт программе окно со своей рамкой, раскладку из областей и вкладок в духе Blender, рабочие пространства, темы и шрифты, настройки в духе JetBrains, раскладку клавиш и «Найти действие», плагины и переводы. Программа приносит только своё, а каждое улучшение ядра сразу доходит до всех программ.
+Forma Core — ядро, на котором построены программы FORMA. Она даёт программе окно со своей рамкой, раскладку из областей в духе Blender (в каждой области один редактор, меню вида редактора, деление и объединение за уголки), рабочие пространства, темы и шрифты, настройки в духе JetBrains, раскладку клавиш и «Найти действие», плагины и переводы. Программа приносит только своё, а каждое улучшение ядра сразу доходит до всех программ.
 
 Программы на Forma Core:
 
@@ -97,7 +97,7 @@ Forma Core — ядро, на котором построены программ
 | Крейт | Что делает |
 |---|---|
 | `forma-shell` | Оболочка программы: рамка окна, меню, рабочие пространства, строка состояния, экран приветствия, настройки, «Найти действие», плагины и темы. Программа описывает себя в `Spec` и запускается через `forma_shell::run` |
-| `forma-layout` | Составной интерфейс: дерево областей, вкладки, перетаскивание, отдельные окна ОС |
+| `forma-layout` | Составной интерфейс: дерево областей с одним редактором в каждой, меню вида редактора, жесты за уголки, отдельные окна ОС |
 | `forma-ui` | Движок тем, значки, шрифты, виджеты, окно настроек и его страницы, инструменты для тем. Везёт темы Mycelium Dark и Light (`forma_ui::theme::MYCELIUM_THEMES`) |
 | `forma-actions` | Действия и раскладка клавиш |
 | `forma-settings` | Компоненты настроек, их файлы, экспорт и импорт |

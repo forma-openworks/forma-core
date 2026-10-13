@@ -1,55 +1,64 @@
 //! Рабочие пространства — вкладки над интерфейсом, как Layout / Modeling / Shading в Blender.
 //! У каждого своя раскладка областей; отдельные окна ОС общие для всех пространств.
 //!
-//! Программа описывает вкладку области ([`ShellTab`]) и свои встроенные пространства
+//! Программа описывает редактор области ([`ShellEditor`]) и свои встроенные пространства
 //! ([`Builtin`]): их названия и исходные раскладки.
 
 use std::path::Path;
 
 use eframe::egui::{self, Color32, Frame, Ui};
 use forma_i18n::t;
-use forma_layout::{AreaId, DockState, DockStyle, Node, Surface, SurfaceKey, TabViewer};
+use forma_layout::{AreaId, DockState, DockStyle, EditorViewer, Node, Place, Surface, SurfaceKey, Zone};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-/// Вкладка области: у каждой свой номер, уникальный во всей раскладке.
-pub trait ShellTab: Clone + Serialize + DeserializeOwned + 'static {
+/// Редактор области: у каждого свой номер, уникальный во всей раскладке.
+pub trait ShellEditor: Clone + Serialize + DeserializeOwned + 'static {
     fn id(&self) -> u64;
     fn set_id(&mut self, id: u64);
-    /// Вкладка в стандартной раскладке, которая подходит всем: открытые документы обычно
-    /// убираются (`None`), а окна инструментов остаются как есть.
-    fn for_default_layout(&self) -> Option<Self> {
-        Some(self.clone())
+    /// Самый большой номер внутри редактора: если у его вкладок свои номера из того же
+    /// счётчика, новые номера не должны их повторять.
+    fn max_id(&self) -> u64 {
+        self.id()
+    }
+    /// Новые номера редактору (и его вкладкам) — при копировании рабочего пространства.
+    fn renumber(&mut self, next: &mut dyn FnMut() -> u64) {
+        self.set_id(next());
+    }
+    /// Редактор в стандартной раскладке, которая подходит всем: открытые документы обычно
+    /// убираются, а сам редактор остаётся.
+    fn for_default_layout(&self) -> Self {
+        self.clone()
     }
 }
 
 /// Встроенное пространство программы: его раскладку можно сбросить к исходной.
 pub trait Builtin: Copy + PartialEq + Serialize + DeserializeOwned + 'static {
-    type Tab: ShellTab;
+    type Editor: ShellEditor;
     /// Все встроенные пространства — набор при первом запуске.
     fn all() -> &'static [Self];
     fn title(self) -> String;
     /// Исходная раскладка пространства.
-    fn surface(self, ids: &mut Ids<'_, Self::Tab>) -> Surface<Self::Tab>;
+    fn surface(self, ids: &mut Ids<'_, Self::Editor>) -> Surface<Self::Editor>;
 }
 
-/// Выдаёт номера областей и вкладок при сборке раскладок.
+/// Выдаёт номера областей и редакторов при сборке раскладок.
 pub struct Ids<'a, T> {
     pub dock: &'a mut DockState<T>,
-    pub next_tab: &'a mut u64,
+    pub next_editor: &'a mut u64,
 }
 
 impl<T> Ids<'_, T> {
-    /// Новый номер вкладки.
+    /// Новый номер редактора.
     pub fn next_id(&mut self) -> u64 {
-        *self.next_tab += 1;
-        *self.next_tab
+        *self.next_editor += 1;
+        *self.next_editor
     }
 
-    /// Область с вкладками `tabs`.
-    pub fn area(&mut self, tabs: Vec<T>) -> Node<T> {
+    /// Область с редактором `editor`.
+    pub fn area(&mut self, editor: T) -> Node<T> {
         let id: AreaId = self.dock.new_area_id();
-        Node::area(id, tabs)
+        Node::area(id, editor)
     }
 }
 
@@ -60,7 +69,7 @@ pub struct Workspace<B: Builtin> {
     pub builtin: Option<B>,
     /// Своё имя; без него показывается имя шаблона на текущем языке.
     pub name: Option<String>,
-    pub surface: Surface<B::Tab>,
+    pub surface: Surface<B::Editor>,
 }
 
 impl<B: Builtin> Workspace<B> {
@@ -74,7 +83,7 @@ impl<B: Builtin> Workspace<B> {
 }
 
 /// Набор пространств при первом запуске.
-pub fn default_workspaces<B: Builtin>(ids: &mut Ids<'_, B::Tab>) -> Vec<Workspace<B>> {
+pub fn default_workspaces<B: Builtin>(ids: &mut Ids<'_, B::Editor>) -> Vec<Workspace<B>> {
     B::all().iter().map(|&b| Workspace { builtin: Some(b), name: None, surface: b.surface(ids) }).collect()
 }
 
@@ -84,64 +93,63 @@ pub fn default_workspaces<B: Builtin>(ids: &mut Ids<'_, B::Tab>) -> Vec<Workspac
 pub struct Layout<B: Builtin> {
     pub workspaces: Vec<Workspace<B>>,
     pub active: usize,
-    pub dock: DockState<B::Tab>,
-    pub next_tab_id: u64,
+    pub dock: DockState<B::Editor>,
+    #[serde(alias = "next_tab_id")]
+    pub next_editor_id: u64,
 }
 
 impl<B: Builtin> Layout<B> {
     /// Заводская раскладка: все встроенные пространства.
     pub fn factory() -> Self {
         let mut dock = DockState::default();
-        let mut next_tab = 0;
-        let workspaces = default_workspaces(&mut Ids { dock: &mut dock, next_tab: &mut next_tab });
-        Self { workspaces, active: 0, dock, next_tab_id: next_tab }
+        let mut next = 0;
+        let workspaces = default_workspaces(&mut Ids { dock: &mut dock, next_editor: &mut next });
+        Self { workspaces, active: 0, dock, next_editor_id: next }
     }
 
-    pub fn ids(&mut self) -> Ids<'_, B::Tab> {
-        Ids { dock: &mut self.dock, next_tab: &mut self.next_tab_id }
+    pub fn ids(&mut self) -> Ids<'_, B::Editor> {
+        Ids { dock: &mut self.dock, next_editor: &mut self.next_editor_id }
     }
 
-    /// Новый номер вкладки.
+    /// Новый номер редактора.
     pub fn next_id(&mut self) -> u64 {
-        self.next_tab_id += 1;
-        self.next_tab_id
+        self.next_editor_id += 1;
+        self.next_editor_id
     }
 
-    /// Раскладка текущего пространства, общее состояние областей и счётчик номеров вкладок —
-    /// по отдельности, чтобы рисовать области и выдавать номера новым вкладкам одновременно.
-    pub fn parts(&mut self) -> (&mut Surface<B::Tab>, &mut DockState<B::Tab>, &mut u64) {
+    /// Раскладка текущего пространства, общее состояние областей и счётчик номеров редакторов —
+    /// по отдельности, чтобы рисовать области и выдавать номера новым редакторам одновременно.
+    pub fn parts(&mut self) -> (&mut Surface<B::Editor>, &mut DockState<B::Editor>, &mut u64) {
         if self.active >= self.workspaces.len() {
             self.active = 0;
         }
         let active = self.active;
-        (&mut self.workspaces[active].surface, &mut self.dock, &mut self.next_tab_id)
+        (&mut self.workspaces[active].surface, &mut self.dock, &mut self.next_editor_id)
     }
 
     /// Раскладка текущего пространства.
-    pub fn surface(&self) -> &Surface<B::Tab> {
+    pub fn surface(&self) -> &Surface<B::Editor> {
         &self.workspaces[self.active.min(self.workspaces.len() - 1)].surface
     }
 
-    pub fn surface_mut(&mut self) -> &mut Surface<B::Tab> {
+    pub fn surface_mut(&mut self) -> &mut Surface<B::Editor> {
         let i = self.active.min(self.workspaces.len() - 1);
         &mut self.workspaces[i].surface
     }
 
     /// Раскладки всех пространств и отдельных окон.
-    pub fn surfaces(&self) -> impl Iterator<Item = &Surface<B::Tab>> {
+    pub fn surfaces(&self) -> impl Iterator<Item = &Surface<B::Editor>> {
         self.workspaces.iter().map(|w| &w.surface).chain(self.dock.windows.iter().map(|w| &w.surface))
     }
 
-    /// Вкладки текущего пространства и отдельных окон.
-    pub fn visible_tabs(&self) -> impl Iterator<Item = &B::Tab> {
-        std::iter::once(self.surface())
-            .chain(self.dock.windows.iter().map(|w| &w.surface))
-            .flat_map(|s| s.areas().into_iter().flat_map(|a| a.tabs.iter()))
+    /// Редакторы текущего пространства и отдельных окон.
+    pub fn visible_editors(&self) -> impl Iterator<Item = &B::Editor> {
+        std::iter::once(self.surface()).chain(self.dock.windows.iter().map(|w| &w.surface)).flat_map(|s| s.editors().collect::<Vec<_>>())
     }
 
-    /// Все вкладки всех пространств и окон.
-    pub fn all_tabs(&self) -> impl Iterator<Item = &B::Tab> {
-        self.surfaces().flat_map(|s| s.areas().into_iter().flat_map(|a| a.tabs.iter()))
+    /// Все редакторы всех пространств и окон.
+    pub fn all_editors(&self) -> impl Iterator<Item = &B::Editor> {
+        self.surfaces().flat_map(|s| s.editors().collect::<Vec<_>>())
     }
 
     /// Чинит загруженную раскладку и выставляет счётчики выше уже занятых номеров.
@@ -155,31 +163,25 @@ impl<B: Builtin> Layout<B> {
         self.dock.sanitize();
         let max_area = self.workspaces.iter().map(|w| w.surface.max_area_id()).max().unwrap_or(0);
         self.dock.reserve_ids(max_area);
-        let max_tab = self.all_tabs().map(ShellTab::id).max().unwrap_or(0);
-        self.next_tab_id = self.next_tab_id.max(max_tab);
+        let max_editor = self.all_editors().map(ShellEditor::max_id).max().unwrap_or(0);
+        self.next_editor_id = self.next_editor_id.max(max_editor);
         self.active = self.active.min(self.workspaces.len() - 1);
     }
 
-    /// Делает вкладку, подходящую под `pred`, текущей в её области: сначала в текущем
-    /// пространстве, потом в отдельных окнах. `false` — такой вкладки нет.
-    pub fn show_tab(&mut self, mut pred: impl FnMut(&B::Tab) -> bool) -> bool {
-        let active = self.active.min(self.workspaces.len() - 1);
-        let mut found: Option<(SurfaceKey, AreaId)> = None;
-        let mut check = |key: SurfaceKey, s: &mut Surface<B::Tab>| {
-            s.for_each_area_mut(|a| {
-                if found.is_none()
-                    && let Some(i) = a.tabs.iter().position(&mut pred)
-                {
-                    a.active = i;
-                    found = Some((key, a.id));
-                }
-            });
-        };
-        check(SurfaceKey::Main, &mut self.workspaces[active].surface);
-        for w in &mut self.dock.windows {
-            check(SurfaceKey::Window(w.id), &mut w.surface);
+    /// Первая область текущего пространства (потом — отдельных окон), чей редактор подходит
+    /// под `pred`.
+    fn find_area(&self, mut pred: impl FnMut(&B::Editor) -> bool) -> Option<(SurfaceKey, AreaId)> {
+        let mut find = |key: SurfaceKey, s: &Surface<B::Editor>| s.areas().into_iter().find(|a| pred(&a.editor)).map(|a| (key, a.id));
+        if let Some(found) = find(SurfaceKey::Main, self.surface()) {
+            return Some(found);
         }
-        match found {
+        self.dock.windows.iter().find_map(|w| find(SurfaceKey::Window(w.id), &w.surface))
+    }
+
+    /// Делает область с подходящим под `pred` редактором текущей и видимой: сначала в текущем
+    /// пространстве, потом в отдельных окнах. `false` — такого редактора нет.
+    pub fn show_editor(&mut self, pred: impl FnMut(&B::Editor) -> bool) -> bool {
+        match self.find_area(pred) {
             Some((key, area)) => {
                 self.reveal_area(key, area);
                 true
@@ -188,125 +190,72 @@ impl<B: Builtin> Layout<B> {
         }
     }
 
-    /// Изменяет первую подходящую вкладку текущего пространства (или отдельного окна)
-    /// и делает её текущей. `false` — такой вкладки нет.
-    pub fn update_tab(&mut self, mut pred: impl FnMut(&B::Tab) -> bool, mut change: impl FnMut(&mut B::Tab)) -> bool {
-        let active = self.active.min(self.workspaces.len() - 1);
-        let mut found: Option<(SurfaceKey, AreaId)> = None;
-        let mut visit = |key: SurfaceKey, s: &mut Surface<B::Tab>| {
-            s.for_each_area_mut(|a| {
-                if found.is_none()
-                    && let Some(i) = a.tabs.iter().position(&mut pred)
-                {
-                    change(&mut a.tabs[i]);
-                    a.active = i;
-                    found = Some((key, a.id));
-                }
-            });
-        };
-        visit(SurfaceKey::Main, &mut self.workspaces[active].surface);
-        for w in &mut self.dock.windows {
-            visit(SurfaceKey::Window(w.id), &mut w.surface);
+    /// Изменяет первый подходящий редактор текущего пространства (или отдельного окна)
+    /// и делает его область текущей. `false` — такого редактора нет.
+    pub fn update_editor(&mut self, pred: impl FnMut(&B::Editor) -> bool, change: impl FnOnce(&mut B::Editor)) -> bool {
+        let Some((key, area)) = self.find_area(pred) else { return false };
+        if let Some(a) = self.surface_by_key(key).and_then(|s| s.area_mut(area)) {
+            change(&mut a.editor);
         }
-        match found {
-            Some((key, area)) => {
-                self.reveal_area(key, area);
-                true
-            }
-            None => false,
+        self.reveal_area(key, area);
+        true
+    }
+
+    /// Изменяет все редакторы всех пространств и окон (например, когда файл переименовали).
+    pub fn for_each_editor_mut(&mut self, mut change: impl FnMut(&mut B::Editor)) {
+        for w in &mut self.workspaces {
+            w.surface.for_each_area_mut(|a| change(&mut a.editor));
+        }
+        for w in &mut self.dock.windows {
+            w.surface.for_each_area_mut(|a| change(&mut a.editor));
         }
     }
 
-    /// Добавляет вкладку в область, где уже есть вкладка, подходящая под `near`; если такой
-    /// нет — в последнюю область, с которой работали.
-    pub fn open_near(&mut self, tab: B::Tab, mut near: impl FnMut(&B::Tab) -> bool) {
-        let mut placed: Option<AreaId> = None;
-        let mut tab = Some(tab);
-        self.surface_mut().for_each_area_mut(|a| {
-            if placed.is_none()
-                && a.tabs.iter().any(&mut near)
-                && let Some(t) = tab.take()
-            {
-                a.tabs.push(t);
-                a.active = a.tabs.len() - 1;
-                placed = Some(a.id);
-            }
-        });
-        match (placed, tab) {
-            (Some(area), _) => self.reveal_area(SurfaceKey::Main, area),
-            (None, Some(t)) => {
-                let surface = self.surface_mut();
-                if surface.maximized.is_some() {
-                    surface.maximized = None;
-                }
-                self.dock.open_tab(t);
-            }
-            (None, None) => {}
+    /// Открывает редактор в новой области текущего пространства: делит область с редактором,
+    /// подходящим под `near`, а если такой нет — самую большую. `side` и `share` — с какого
+    /// края и какой долей встанет новая область (см. [`Place`]).
+    pub fn open_editor(&mut self, editor: B::Editor, mut near: impl FnMut(&B::Editor) -> bool, side: Option<Zone>, share: f32) {
+        let near = self.surface().areas().into_iter().find(|a| near(&a.editor)).map(|a| a.id);
+        self.dock.open_editor(editor, Place { near, side, share });
+    }
+
+    fn surface_by_key(&mut self, key: SurfaceKey) -> Option<&mut Surface<B::Editor>> {
+        match key {
+            SurfaceKey::Main => Some(self.surface_mut()),
+            SurfaceKey::Window(id) => self.dock.windows.iter_mut().find(|w| w.id == id).map(|w| &mut w.surface),
         }
     }
 
     /// Делает область текущей и видимой: если развёрнута другая область, раскладка возвращается.
     pub fn reveal_area(&mut self, key: SurfaceKey, area: AreaId) {
         self.dock.focus(key, area);
-        let active = self.active.min(self.workspaces.len() - 1);
-        let surface = match key {
-            SurfaceKey::Main => Some(&mut self.workspaces[active].surface),
-            SurfaceKey::Window(id) => self.dock.windows.iter_mut().find(|w| w.id == id).map(|w| &mut w.surface),
-        };
-        if let Some(s) = surface
+        if let Some(s) = self.surface_by_key(key)
             && s.maximized.is_some_and(|m| m != area)
         {
             s.maximized = None;
         }
     }
 
-    /// Копия пространства `i` с новыми номерами областей и вкладок.
+    /// Копия пространства `i` с новыми номерами областей и редакторов.
     pub fn copy_workspace(&mut self, i: usize) -> Workspace<B> {
         let mut ws = self.workspaces[i].clone();
         ws.name = Some(t!("workspace-copy-name", name = ws.title()));
         let dock = &mut self.dock;
         ws.surface.reassign_ids(|| dock.new_area_id());
-        let next = &mut self.next_tab_id;
-        ws.surface.for_each_area_mut(|a| {
-            for tab in &mut a.tabs {
-                *next += 1;
-                tab.set_id(*next);
-            }
-        });
+        let next = &mut self.next_editor_id;
+        let mut new_id = || {
+            *next += 1;
+            *next
+        };
+        ws.surface.for_each_area_mut(|a| a.editor.renumber(&mut new_id));
         ws
     }
 
-    /// Копия для стандартной раскладки, которая подходит всем: вкладки документов убраны.
+    /// Копия для стандартной раскладки, которая подходит всем: документы из редакторов убраны.
     pub fn for_default(&self) -> Option<Layout<B>> {
         let value = serde_json::to_value(self).ok()?;
         let mut copy: Layout<B> = serde_json::from_value(value).ok()?;
-        let strip = |s: &mut Surface<B::Tab>| {
-            s.for_each_area_mut(|a| {
-                // Одинаковые вкладки (кроме номера) схлопываются: три пустые вкладки — одна.
-                let mut seen: Vec<serde_json::Value> = Vec::new();
-                a.tabs = a
-                    .tabs
-                    .iter()
-                    .filter_map(ShellTab::for_default_layout)
-                    .filter(|t| {
-                        let mut key = serde_json::to_value(t).unwrap_or_default();
-                        if let Some(o) = key.as_object_mut() {
-                            o.remove("id");
-                        }
-                        let fresh = !seen.contains(&key);
-                        seen.push(key);
-                        fresh
-                    })
-                    .collect();
-                a.clamp_active();
-            });
-        };
-        for w in &mut copy.workspaces {
-            strip(&mut w.surface);
-        }
-        for w in &mut copy.dock.windows {
-            strip(&mut w.surface);
-        }
+        copy.for_each_editor_mut(|e| *e = e.for_default_layout());
         copy.sanitize();
         Some(copy)
     }
@@ -332,13 +281,17 @@ struct LayoutFileRef<'a, B: Builtin> {
     view: &'a serde_json::Value,
 }
 
-/// Версия формата файла раскладки (общая с Forma Mycelium).
-pub const LAYOUT_VERSION: u32 = 2;
+/// Версия формата файла раскладки. Третья — области с одним редактором вместо вкладок.
+pub const LAYOUT_VERSION: u32 = 3;
 
-/// Читает раскладку. Файл другой версии или испорченный — `None` (тогда берётся запасная).
+/// Самая старая версия, которую ещё можно прочитать: из областей со вкладками остаётся
+/// видимая вкладка.
+const OLDEST_LAYOUT: u32 = 2;
+
+/// Читает раскладку. Файл неизвестной версии или испорченный — `None` (тогда берётся запасная).
 pub fn read_layout<B: Builtin>(path: &Path) -> Option<(Layout<B>, serde_json::Value)> {
     let file: LayoutFile<B> = crate::settings::read_json(path)?;
-    if file.version != LAYOUT_VERSION {
+    if !(OLDEST_LAYOUT..=LAYOUT_VERSION).contains(&file.version) {
         return None;
     }
     let mut layout = file.layout;
@@ -352,7 +305,7 @@ pub fn write_layout<B: Builtin>(path: &Path, layout: &Layout<B>, view: &serde_js
 
 /// Рисует области текущего пространства (`surface`, см. [`Layout::parts`]) и отдельные окна.
 /// Вызывать раз за кадр после верхней строки и строки состояния.
-pub fn show<T, V: TabViewer<Tab = T>>(ui: &mut Ui, surface: &mut Surface<T>, dock: &mut DockState<T>, style: &DockStyle, bg: Color32, viewer: &mut V) {
+pub fn show<T, V: EditorViewer<Editor = T>>(ui: &mut Ui, surface: &mut Surface<T>, dock: &mut DockState<T>, style: &DockStyle, bg: Color32, viewer: &mut V) {
     let ctx = ui.ctx().clone();
     egui::CentralPanel::default().frame(Frame::new().fill(bg)).show(ui, |ui| {
         dock.show_main(ui, surface, viewer, style);

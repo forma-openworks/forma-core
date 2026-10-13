@@ -392,7 +392,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         }
     }
 
-    /// Общие сочетания клавиш в отдельном окне ОС (из `TabViewer::window_input`).
+    /// Общие сочетания клавиш в отдельном окне ОС (из `EditorViewer::window_input`).
     pub fn fire_global(ui: &mut egui::Ui, actions: &Registry, keymap: &forma_actions::Keymap, fired: &mut Vec<String>) {
         fired.extend(ui.input_mut(|i| forma_actions::triggered(i, actions, keymap, ActionContext::Global)));
     }

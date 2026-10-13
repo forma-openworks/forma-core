@@ -1,6 +1,6 @@
 [package]
 name = "forma-layout"
-description = "Платформа Forma: составной интерфейс в духе Blender — области, вкладки, отдельные окна"
+description = "Платформа Forma: составной интерфейс в духе Blender — области с редакторами, жесты за уголки, отдельные окна"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
