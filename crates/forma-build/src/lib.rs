@@ -83,7 +83,8 @@ pub struct WindowsResources<'a> {
 pub const ICON_SIZES: [u32; 10] = [16, 20, 24, 32, 40, 48, 64, 96, 128, 256];
 
 /// Вшивает иконку и сведения о продукте в `.exe` (только при сборке под Windows).
-/// Если компилятор ресурсов не найден, программа просто собирается без иконки у файла.
+/// Если компилятор ресурсов не найден, программа собирается без иконки у файла, а сборка
+/// предупреждает об этом.
 pub fn windows_resources(res: &WindowsResources) {
     println!("cargo:rerun-if-changed=build.rs");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
@@ -94,8 +95,16 @@ pub fn windows_resources(res: &WindowsResources) {
     std::fs::write(&ico, ico_file(&ICON_SIZES, res.icon)).expect("не удалось записать .ico");
     let rc = out.join("app.rc");
     std::fs::write(&rc, resource_script(&ico, res)).expect("не удалось записать .rc");
-    if let Err(err) = embed_resource::compile(&rc, embed_resource::NONE).manifest_optional() {
-        println!("cargo:warning=Иконка не вшита в .exe: {err}");
+    match embed_resource::compile(&rc, embed_resource::NONE) {
+        embed_resource::CompilationResult::Ok | embed_resource::CompilationResult::NotWindows => {}
+        // Без компилятора ресурсов embed-resource молча пропускает шаг, и .exe тихо
+        // остаётся без значка — поэтому говорим об этом вслух.
+        problem => {
+            let package = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
+            println!(
+                "cargo:warning=Иконка и сведения о программе не вшиты в .exe ({problem}). Нужен компилятор ресурсов: rc.exe из Visual Studio Build Tools для msvc или windres в PATH для gnu; после установки — cargo clean -p {package}."
+            );
+        }
     }
 }
 
