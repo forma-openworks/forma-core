@@ -811,6 +811,8 @@ impl<T> DockState<T> {
         }
         let full = ui.available_rect_before_wrap();
         let rect = full.shrink(GAP);
+        // Зазоры — цветом зазора (им же закрашиваются углы областей).
+        ui.painter().rect_filled(full, CornerRadius::ZERO, style.gap_bg);
         let mut frame = Frame0 { key, areas: Vec::new() };
 
         match &mut surface.root {
@@ -1123,7 +1125,6 @@ impl<T> DockState<T> {
         painter.rect_filled(header, CornerRadius { nw: RADIUS, ne: RADIUS, sw: 0, se: 0 }, style.header_bg);
         let focus_t = ctx.animate_bool_with_time(Id::new(("forma-dock-focus", area.id)), focused, 0.2);
         let outline = style.border.lerp_to_gamma(style.accent.gamma_multiply(0.55), focus_t);
-        painter.rect_stroke(rect, CornerRadius::same(RADIUS), Stroke::new(1.0, outline), StrokeKind::Inside);
 
         // Пустое место заголовка: правая кнопка — меню области, двойной щелчок — развернуть,
         // перетаскивание — перенести область в другое место или окно.
@@ -1198,6 +1199,11 @@ impl<T> DockState<T> {
         );
         child.set_clip_rect(body.intersect(ui.clip_rect()));
         viewer.ui(&mut child, &mut area.editor);
+
+        // Рамка — поверх содержимого: редактор закрашивает свой прямоугольник целиком, и без
+        // этого рамка оставалась бы только у заголовка, а углы были бы квадратными.
+        round_corners(&painter, rect, style.gap_bg);
+        painter.rect_stroke(rect, CornerRadius::same(RADIUS), Stroke::new(1.0, outline), StrokeKind::Inside);
 
         // Уголки — поверх всего, как в Blender. У развёрнутой области их нет.
         if !maximized {
@@ -1334,6 +1340,32 @@ fn kind_menu(ui: &mut Ui, groups: &[KindGroup], current: Option<&str>, style: &D
         }
     });
     picked
+}
+
+/// Закрашивает цветом зазора всё, что содержимое нарисовало за скруглёнными углами области.
+fn round_corners(painter: &egui::Painter, rect: Rect, color: Color32) {
+    const STEPS: usize = 8;
+    let r = RADIUS as f32;
+    let corners = [
+        (rect.left_top(), pos2(rect.left() + r, rect.top() + r), 180.0_f32),
+        (rect.right_top(), pos2(rect.right() - r, rect.top() + r), 270.0),
+        (rect.right_bottom(), pos2(rect.right() - r, rect.bottom() - r), 0.0),
+        (rect.left_bottom(), pos2(rect.left() + r, rect.bottom() - r), 90.0),
+    ];
+    let mut mesh = egui::Mesh::default();
+    for (corner, center, start) in corners {
+        // Веер треугольников от угла прямоугольника к дуге скругления.
+        let base = mesh.vertices.len() as u32;
+        mesh.colored_vertex(corner, color);
+        for i in 0..=STEPS {
+            let a = (start + 90.0 * i as f32 / STEPS as f32).to_radians();
+            mesh.colored_vertex(center + r * vec2(a.cos(), a.sin()), color);
+        }
+        for i in 0..STEPS as u32 {
+            mesh.add_triangle(base, base + 1 + i, base + 2 + i);
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 /// Линия будущего разреза в промежутке `sep`.

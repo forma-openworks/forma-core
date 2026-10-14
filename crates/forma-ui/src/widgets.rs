@@ -154,7 +154,8 @@ pub fn centered_text(ui: &mut Ui, text: &str, size: f32, color: Color32, max_wid
 
 /// Вкладка документа в заголовке области, как в IDE от JetBrains: значок, название и
 /// крестик, а у несохранённого документа, пока курсор не над вкладкой, — точка.
-/// Возвращает ответ и наведён ли курсор на крестик.
+/// Открытая вкладка отмечена полоской по нижнему краю заголовка — отдельно от названия,
+/// а не подчёркиванием под ним. Возвращает ответ и наведён ли курсор на крестик.
 pub fn doc_tab(ui: &mut Ui, pal: &Palette, icon: &str, title: &str, active: bool, dirty: bool) -> (egui::Response, bool) {
     let text_color = if active { pal.tab_active_text } else { pal.tab_text };
     let galley = ui.painter().layout_no_wrap(title.to_owned(), FontId::proportional(13.0), text_color);
@@ -162,19 +163,23 @@ pub fn doc_tab(ui: &mut Ui, pal: &Palette, icon: &str, title: &str, active: bool
     let height = ui.available_height().clamp(22.0, 30.0);
     let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
     let painter = ui.painter_at(rect);
-    let r = rect.shrink2(vec2(0.0, 3.0));
     let hovered = resp.hovered();
-    if active {
-        painter.rect_filled(r, CornerRadius::same(6), pal.tab_hover.gamma_multiply(0.7));
-        painter.hline(r.left() + 6.0..=r.right() - 6.0, r.bottom() - 1.0, Stroke::new(2.0, pal.tab_indicator));
-    } else if hovered {
-        painter.rect_filled(r, CornerRadius::same(6), pal.tab_hover);
+    let t = ui.ctx().animate_bool_with_time(resp.id.with("active"), active, 0.15);
+    if hovered && !active {
+        painter.rect_filled(rect.shrink2(vec2(0.0, 4.0)), CornerRadius::same(6), pal.tab_hover);
     }
-    let icon_rect = Rect::from_center_size(pos2(r.left() + 15.0, r.center().y), vec2(14.0, 14.0));
+    if t > 0.0 {
+        // Полоска «вырастает» из середины вкладки.
+        let half = (rect.width() / 2.0 - 3.0).max(0.0) * t;
+        let bar = Rect::from_min_max(pos2(rect.center().x - half, rect.bottom() - 2.0), pos2(rect.center().x + half, rect.bottom()));
+        painter.rect_filled(bar, CornerRadius::same(1), pal.tab_indicator);
+    }
+    let cy = rect.center().y;
+    let icon_rect = Rect::from_center_size(pos2(rect.left() + 15.0, cy), vec2(14.0, 14.0));
     crate::icons::paint(&painter, icon_rect, icon, pal.text_muted);
-    painter.galley(pos2(icon_rect.right() + 6.0, r.center().y - galley.size().y / 2.0), galley, text_color);
+    painter.galley(pos2(icon_rect.right() + 6.0, cy - galley.size().y / 2.0), galley, text_color);
 
-    let close = Rect::from_center_size(pos2(r.right() - 14.0, r.center().y), vec2(16.0, 16.0));
+    let close = Rect::from_center_size(pos2(rect.right() - 14.0, cy), vec2(16.0, 16.0));
     let on_close = resp.hover_pos().is_some_and(|p| close.contains(p));
     if hovered || (active && !dirty) {
         if on_close {
