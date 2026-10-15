@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use eframe::egui::{self, Align, Key, Layout, Margin, RichText, TextEdit, Ui, vec2};
+use eframe::egui::{self, Key, Margin, RichText, TextEdit, Ui, vec2};
 use forma_actions::{Context as ActionContext, Keymap};
 use forma_i18n::t;
 use forma_plugins::PluginSettings;
@@ -295,7 +295,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         }
         ui.add_space(14.0);
         let mut close = false;
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        forma_ui::widgets::button_row(ui, |ui| {
             let any = e.checked.iter().any(|(_, c)| *c);
             if ui.add_enabled_ui(any, |ui| sw::primary_button(ui, pal, &t!("settings-export-button"))).inner.clicked() {
                 close = self.export_settings(e);
@@ -439,7 +439,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
             }
             ui.add_space(14.0);
             let mut close = false;
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            forma_ui::widgets::button_row(ui, |ui| {
                 close = sw::primary_button(ui, pal, &t!("action-done")).clicked();
                 if !d.missing_plugins.is_empty() && forma_ui::icons::text_button(ui, "plugin", t!("settings-import-open-plugins")).clicked() {
                     self.cmds.push(ShellCmd::OpenSettingsPage(plugins_page::PAGE.into()));
@@ -461,7 +461,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         ui.add_space(14.0);
         let mut close = false;
         let mut import = false;
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        forma_ui::widgets::button_row(ui, |ui| {
             let any = d.items.iter().any(|i| i.checked && i.status.applicable());
             import = ui.add_enabled_ui(any, |ui| sw::primary_button(ui, pal, &t!("settings-import-button"))).inner.clicked();
             if ui.add(egui::Button::new(t!("settings-cancel")).min_size(vec2(84.0, 30.0))).clicked() {
@@ -496,7 +496,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         let max_h = modal_max_height(ctx);
         // Окно настроек и импорт не закрываются щелчком мимо: там легко потерять изменения.
         let sticky = matches!(modal, Modal::Settings(_) | Modal::Import(_));
-        let margin = if matches!(modal, Modal::Settings(_)) { 0 } else { 22 };
+        let margin = if matches!(modal, Modal::Settings(_)) { 0 } else { chrome::MODAL_MARGIN };
         let mut rename_done: Option<(usize, String)> = None;
         let mut theme = self.settings.appearance.theme.clone();
         let (close, outside) = chrome::modal(ctx, &pal, sticky, margin, |ui| match &mut modal {
@@ -536,7 +536,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
                 let mut ok = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
                 let mut close = false;
                 ui.add_space(16.0);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                forma_ui::widgets::button_row(ui, |ui| {
                     ok |= sw::primary_button(ui, &pal, &t!("action-rename")).clicked();
                     if ui.add(egui::Button::new(t!("action-cancel")).min_size(vec2(84.0, 30.0))).clicked() {
                         close = true;
@@ -549,7 +549,9 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
             }
         });
         let mut close = close || outside;
-        if self.settings.appearance.theme != theme {
+        // Тему здесь меняет только быстрая смена темы. Окно настроек применяет свою копию
+        // настроек само — и её нельзя затирать прежней темой.
+        if matches!(modal, Modal::ThemeSwitcher(_)) && self.settings.appearance.theme != theme {
             self.settings.appearance.theme = theme;
         }
         if let Modal::ThemeSwitcher(sw) = &modal

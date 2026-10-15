@@ -69,10 +69,14 @@ pub(crate) fn reset_modal_fade(ctx: &egui::Context) {
     ctx.animate_bool_with_time(Id::new(MODAL_FADE), false, 0.0);
 }
 
+/// Поля небольших диалогов (переименовать, удалить, «Сохранить изменения?»…): как в IDE от
+/// JetBrains, без лишнего воздуха.
+pub const MODAL_MARGIN: i8 = 16;
+
 /// Заголовок диалога.
 pub fn modal_title(ui: &mut Ui, pal: &Palette, text: &str) {
-    ui.label(RichText::new(text).size(18.0).family(forma_ui::fonts::semibold()).color(pal.heading));
-    ui.add_space(12.0);
+    ui.label(RichText::new(text).size(16.0).family(forma_ui::fonts::semibold()).color(pal.heading));
+    ui.add_space(10.0);
 }
 
 /// Пункт меню с сочетанием клавиш справа.

@@ -164,46 +164,95 @@ pub fn doc_tab(ui: &mut Ui, pal: &Palette, icon: &str, title: &str, active: bool
 /// одинаковыми именами (`main.rs  src/bin`), пометка «удалён».
 #[allow(clippy::too_many_arguments)]
 pub fn doc_tab_hinted(ui: &mut Ui, pal: &Palette, icon: &str, title: &str, hint: Option<(&str, Color32)>, active: bool, dirty: bool) -> (egui::Response, bool) {
-    let text_color = if active { pal.tab_active_text } else { pal.tab_text };
-    let galley = ui.painter().layout_no_wrap(title.to_owned(), FontId::proportional(13.0), text_color);
-    let hint = hint.map(|(text, color)| ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(11.5), color));
-    let hint_w = hint.as_ref().map_or(0.0, |g| g.size().x + 6.0);
-    let width = 8.0 + 14.0 + 6.0 + galley.size().x + hint_w + 6.0 + 16.0 + 6.0;
-    let height = ui.available_height().clamp(22.0, 30.0);
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click_and_drag());
-    let painter = ui.painter_at(rect);
-    let hovered = resp.hovered();
-    let t = ui.ctx().animate_bool_with_time(resp.id.with("active"), active, 0.15);
-    if hovered && !active {
-        painter.rect_filled(rect.shrink2(vec2(0.0, 4.0)), CornerRadius::same(6), pal.tab_hover);
-    }
-    if t > 0.0 {
-        // Полоска «вырастает» из середины вкладки.
-        let half = (rect.width() / 2.0 - 3.0).max(0.0) * t;
-        let bar = Rect::from_min_max(pos2(rect.center().x - half, rect.bottom() - 2.0), pos2(rect.center().x + half, rect.bottom()));
-        painter.rect_filled(bar, CornerRadius::same(1), pal.tab_indicator);
-    }
-    let cy = rect.center().y;
-    let icon_rect = Rect::from_center_size(pos2(rect.left() + 15.0, cy), vec2(14.0, 14.0));
-    crate::icons::paint(&painter, icon_rect, icon, pal.text_muted);
-    let title_right = icon_rect.right() + 6.0 + galley.size().x;
-    painter.galley(pos2(icon_rect.right() + 6.0, cy - galley.size().y / 2.0), galley, text_color);
-    if let Some(g) = hint {
-        let color = g.job.sections.first().map_or(pal.text_faint, |s| s.format.color);
-        painter.galley(pos2(title_right + 6.0, cy - g.size().y / 2.0 + 0.5), g, color);
+    let tab = DocTab { icon, title, hint, active, dirty };
+    let (rect, resp) = ui.allocate_exact_size(vec2(tab.width(ui), doc_tab_height(ui)), Sense::click_and_drag());
+    let on_close = tab.paint(ui, pal, rect, &resp, false);
+    (resp.on_hover_cursor(CursorIcon::PointingHand), on_close)
+}
+
+/// Высота вкладки документа в строке вкладок.
+pub fn doc_tab_height(ui: &Ui) -> f32 {
+    ui.available_height().clamp(22.0, 30.0)
+}
+
+/// Вкладка документа для строк вкладок, которые программа раскладывает сама (вкладку тащат,
+/// соседние расступаются): ширина отдельно, отрисовка — в заданном прямоугольнике.
+#[derive(Clone, Copy)]
+pub struct DocTab<'a> {
+    pub icon: &'a str,
+    pub title: &'a str,
+    /// Подпись после названия и её цвет (см. [`doc_tab_hinted`]).
+    pub hint: Option<(&'a str, Color32)>,
+    pub active: bool,
+    pub dirty: bool,
+}
+
+impl DocTab<'_> {
+    pub fn width(&self, ui: &Ui) -> f32 {
+        let text = |s: &str, size: f32| ui.painter().layout_no_wrap(s.to_owned(), FontId::proportional(size), Color32::WHITE).size().x;
+        let hint = self.hint.map_or(0.0, |(h, _)| text(h, 11.5) + 6.0);
+        8.0 + 14.0 + 6.0 + text(self.title, 13.0) + hint + 6.0 + 16.0 + 6.0
     }
 
-    let close = Rect::from_center_size(pos2(rect.right() - 14.0, cy), vec2(16.0, 16.0));
-    let on_close = resp.hover_pos().is_some_and(|p| close.contains(p));
-    if hovered || (active && !dirty) {
-        if on_close {
-            painter.rect_filled(close, CornerRadius::same(4), pal.tab_hover);
+    /// Рисует вкладку в `rect`; `resp` — её ответ (наведение, крестик). `lifted` — вкладку
+    /// тащат по строке: она поверх соседних, со своим фоном. Возвращает, наведён ли курсор
+    /// на крестик.
+    pub fn paint(&self, ui: &Ui, pal: &Palette, rect: Rect, resp: &egui::Response, lifted: bool) -> bool {
+        let hovered = resp.hovered() && !lifted;
+        let text_color = if self.active || hovered || lifted { pal.tab_active_text } else { pal.tab_text };
+        let galley = ui.painter().layout_no_wrap(self.title.to_owned(), FontId::proportional(13.0), text_color);
+        let hint = self.hint.map(|(text, color)| ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(11.5), color));
+        let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
+        let t = ui.ctx().animate_bool_with_time(resp.id.with("active"), self.active, 0.15);
+        let hover_t = ui.ctx().animate_bool_with_time(resp.id.with("hover"), hovered && !self.active, 0.1);
+        if lifted {
+            painter.rect_filled(rect, CornerRadius::ZERO, pal.area_header);
+            painter.rect_filled(rect, CornerRadius::ZERO, pal.tab_active_text.gamma_multiply(0.06));
+        } else if hover_t > 0.0 {
+            // Под указателем вся вкладка чуть светлее, а внизу проступает бледная полоска —
+            // тот же знак, что у открытой вкладки, а не «кнопка» посреди строки.
+            painter.rect_filled(rect, CornerRadius::ZERO, pal.tab_active_text.gamma_multiply(0.05 * hover_t));
+            let bar = Rect::from_min_max(pos2(rect.left() + 3.0, rect.bottom() - 2.0), pos2(rect.right() - 3.0, rect.bottom()));
+            painter.rect_filled(bar, CornerRadius::same(1), pal.tab_text.gamma_multiply(0.4 * hover_t));
         }
-        crate::icons::paint(&painter, close.shrink(3.0), "close", if on_close { pal.tab_active_text } else { pal.tab_text });
-    } else if dirty {
-        painter.circle_filled(close.center(), 3.5, pal.accent);
+        if t > 0.0 {
+            // Полоска «вырастает» из середины вкладки.
+            let half = (rect.width() / 2.0 - 3.0).max(0.0) * t;
+            let bar = Rect::from_min_max(pos2(rect.center().x - half, rect.bottom() - 2.0), pos2(rect.center().x + half, rect.bottom()));
+            painter.rect_filled(bar, CornerRadius::same(1), pal.tab_indicator);
+        }
+        let cy = rect.center().y;
+        let icon_rect = Rect::from_center_size(pos2(rect.left() + 15.0, cy), vec2(14.0, 14.0));
+        crate::icons::paint(&painter, icon_rect, self.icon, pal.text_muted);
+        let title_right = icon_rect.right() + 6.0 + galley.size().x;
+        painter.galley(pos2(icon_rect.right() + 6.0, cy - galley.size().y / 2.0), galley, text_color);
+        if let Some(g) = hint {
+            let color = g.job.sections.first().map_or(pal.text_faint, |s| s.format.color);
+            painter.galley(pos2(title_right + 6.0, cy - g.size().y / 2.0 + 0.5), g, color);
+        }
+
+        let close = Rect::from_center_size(pos2(rect.right() - 14.0, cy), vec2(16.0, 16.0));
+        let on_close = hovered && resp.hover_pos().is_some_and(|p| close.contains(p));
+        if hovered || (self.active && !self.dirty) {
+            if on_close {
+                painter.rect_filled(close, CornerRadius::same(4), pal.tab_hover);
+            }
+            crate::icons::paint(&painter, close.shrink(3.0), "close", if on_close { pal.tab_active_text } else { pal.tab_text });
+        } else if self.dirty {
+            painter.circle_filled(close.center(), 3.5, pal.accent);
+        }
+        on_close
     }
-    (resp.on_hover_cursor(CursorIcon::PointingHand), on_close)
+}
+
+/// Высота ряда кнопок диалога.
+pub const BUTTON_ROW_H: f32 = 30.0;
+
+/// Ряд кнопок диалога, справа налево (главная — первой). Высота ряда — по кнопкам:
+/// `ui.with_layout` отдал бы ряду всё свободное место окна и поставил кнопки посередине,
+/// и в диалоге появилась бы пустота, тем большая, чем выше окно программы.
+pub fn button_row<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), BUTTON_ROW_H), Layout::right_to_left(Align::Center), add).inner
 }
 
 /// Небольшая кнопка-значок в заголовке области.

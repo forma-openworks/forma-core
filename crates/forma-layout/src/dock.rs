@@ -32,6 +32,11 @@ const RADIUS: u8 = 8;
 const MIN_AREA: f32 = 72.0;
 /// Размер нового отдельного окна, если размер исходной области неизвестен.
 const DEFAULT_WINDOW: Vec2 = vec2(720.0, 480.0);
+/// Доля стороны области у каждого края, над которой вынесенная вкладка встанет рядом с
+/// областью (`ide.tabbedPane.dragToSplitRatio` в IDE от JetBrains).
+const CARRY_EDGE: f32 = 0.2;
+/// Наибольшая сторона превью вынесенной вкладки у курсора.
+const PREVIEW_SIDE: f32 = 220.0;
 /// Сторона уголка, за который тянут жесты.
 const CORNER: f32 = 12.0;
 /// На сколько надо отвести мышь от уголка внутрь области, чтобы выбрать направление разреза.
@@ -124,20 +129,33 @@ pub trait EditorViewer {
     fn window_input(&mut self, _ui: &mut Ui) {}
 
     /// Программа начала тащить часть редактора `editor` наружу (например, вкладку файла из
-    /// строки вкладок): подпись у курсора. Дальше перенос ведёт раскладка, как перенос
-    /// области: подсвечивает, куда встанет новый редактор, а мимо окон программы — новое окно.
-    fn carry_started(&mut self, _editor: &mut Self::Editor) -> Option<String> {
+    /// строки вкладок): что тащат. Дальше перенос ведёт раскладка, как в IDE от JetBrains: у
+    /// курсора — уменьшенный снимок области (над строкой вкладок — сама вкладка), над областью
+    /// подсвечено, куда встанет перенесённое, а мимо окон программы оно станет новым окном.
+    fn carry_started(&mut self, _editor: &mut Self::Editor) -> Option<CarryInfo> {
         None
     }
 
-    /// Перенос части редактора закончился над краем области, над пустым окном или мимо окон:
-    /// программа вынимает её из `source` и отдаёт новым редактором. `None` — нечего.
+    /// Можно ли положить вынесенную часть в этот редактор: в его заголовок (к вкладкам) или
+    /// в середину области. Рядом с любой областью её положить можно всегда.
+    fn accepts_carry(&mut self, _editor: &Self::Editor) -> bool {
+        false
+    }
+
+    /// Перенос части редактора идёт над заголовком этой области: где указатель (координаты
+    /// окна); `None` — не над ней. Вызывается каждый кадр перед [`Self::header`]: программа
+    /// раздвигает вкладки там, куда встанет перенесённое.
+    fn carry_over(&mut self, _editor: &mut Self::Editor, _pointer: Option<Pos2>) {}
+
+    /// Перенос части редактора закончился: программа вынимает её из `source` и отдаёт новым
+    /// редактором. `None` — нечего.
     fn carry_take(&mut self, _source: &mut Self::Editor) -> Option<Self::Editor> {
         None
     }
 
-    /// Вынутое отпустили над серединой области: программа добавляет `part` в редактор
-    /// `target` (вкладка — к его вкладкам). `Err` — сюда нельзя, и часть вернётся обратно.
+    /// Вынутое отпустили над заголовком или серединой области: программа добавляет `part` в
+    /// редактор `target` (вкладка — к его вкладкам; над заголовком — туда, где был раздвинут
+    /// промежуток, см. [`Self::carry_over`]). `Err` — сюда нельзя, и часть вернётся обратно.
     fn carry_merge(&mut self, _target: &mut Self::Editor, part: Self::Editor) -> Result<(), Self::Editor> {
         Err(part)
     }
@@ -149,6 +167,15 @@ pub trait EditorViewer {
     fn is_empty(&mut self, _editor: &Self::Editor) -> bool {
         false
     }
+}
+
+/// Что программа вынесла из редактора (см. [`EditorViewer::carry_started`]): подпись и
+/// значок — для вкладки у курсора.
+#[derive(Clone, Debug)]
+pub struct CarryInfo {
+    pub title: String,
+    /// Имя значка (см. [`DockStyle::paint_icon`]).
+    pub icon: String,
 }
 
 /// Цвета и оформление, которые задаёт приложение.
@@ -166,6 +193,8 @@ pub struct DockStyle {
     pub text_strong: Color32,
     pub accent: Color32,
     pub border: Color32,
+    /// Заливка места, куда упадёт вынесенная вкладка.
+    pub drop_fill: Color32,
     /// Стиль всплывающих меню.
     pub menu_style: fn(&mut egui::Style),
     /// Рисует значок по имени в прямоугольнике заданным цветом. `false` — такого значка
@@ -264,10 +293,31 @@ struct Drag {
     /// Размер исходной области — такого размера будет новое окно.
     size: Vec2,
     /// Тащат не всю область, а часть её редактора (вкладку) — см. [`EditorViewer::carry_started`].
-    carry: bool,
+    carry: Option<Carried>,
     /// Отменили Escape.
     cancelled: bool,
 }
+
+/// Вынесенная из редактора часть и её превью у курсора.
+struct Carried {
+    info: CarryInfo,
+    shot: Shot,
+    /// Сколько кадров показано окно превью: видимым оно становится со второго кадра, когда в
+    /// нём уже что-то нарисовано (иначе мелькнуло бы пустым).
+    frames: u32,
+}
+
+/// Снимок содержимого области, из которой тащат, — для превью у курсора.
+enum Shot {
+    /// Окно-источник снимается; `body` — содержимое области в координатах окна.
+    Waiting { body: Rect },
+    Ready(egui::TextureHandle),
+    /// Снимка нет: у курсора — только вкладка.
+    Missing,
+}
+
+/// Метка снимка окна, который просит раскладка (см. [`egui::ViewportCommand::Screenshot`]).
+struct DockShot;
 
 struct CornerDrag {
     key: SurfaceKey,
@@ -301,6 +351,8 @@ struct SplitPick {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Target {
     Area { key: SurfaceKey, area: AreaId, zone: Zone },
+    /// Заголовок области: вынесенная часть встанет к её вкладкам (только для переноса части).
+    Header { key: SurfaceKey, area: AreaId },
     /// Пустое окно.
     Empty(SurfaceKey),
     /// Мимо всех окон — новое окно в этой точке экрана.
@@ -320,6 +372,8 @@ struct AreaRects {
     id: AreaId,
     header: Rect,
     body: Rect,
+    /// Редактор области принимает вынесенные части (см. [`EditorViewer::accepts_carry`]).
+    accepts: bool,
 }
 
 impl AreaRects {
@@ -471,6 +525,7 @@ impl<T> DockState<T> {
     /// Рисует главное окно. Вызывать внутри центральной панели.
     pub fn show_main(&mut self, ui: &mut Ui, main: &mut Surface<T>, viewer: &mut impl EditorViewer<Editor = T>, style: &DockStyle) {
         self.show_surface(ui, SurfaceKey::Main, main, viewer, style);
+        self.show_preview(ui.ctx(), style);
     }
 
     /// Рисует отдельные окна (каждое — своё окно ОС).
@@ -529,7 +584,7 @@ impl<T> DockState<T> {
         let rects = std::mem::take(&mut self.rt.rects);
         if let Some(drag) = &self.rt.drag {
             // Окно-источник пропало (например, закрылось) — перенос отменяется.
-            if !rects.iter().any(|s| s.key == drag.src) && self.rt.drag.take().is_some_and(|d| d.carry) {
+            if !rects.iter().any(|s| s.key == drag.src) && self.rt.drag.take().is_some_and(|d| d.carry.is_some()) {
                 viewer.carry_cancel();
             }
         }
@@ -544,22 +599,26 @@ impl<T> DockState<T> {
             self.rt.pick = None;
         }
         self.rt.target = Target::Nothing;
-        if self.rt.drag.as_ref().is_some_and(|d| d.cancelled) && self.rt.drag.take().is_some_and(|d| d.carry) {
+        if self.rt.drag.as_ref().is_some_and(|d| d.cancelled) && self.rt.drag.take().is_some_and(|d| d.carry.is_some()) {
             viewer.carry_cancel();
         }
         if let Some(drag) = &self.rt.drag {
-            let target = drag.pointer.map_or(Target::Nothing, |p| compute_target(&rects, p));
+            let carry = drag.carry.is_some();
+            let target = drag.pointer.map_or(Target::Nothing, |p| compute_target(&rects, p, carry));
             let target = match target {
-                // Часть редактора можно положить и рядом с её же областью, но не в неё саму.
-                Target::Area { key, area, zone } if key == drag.src && area == drag.area && (!drag.carry || zone == Zone::Center) => Target::Nothing,
+                // Область не кладут на её же место. Часть редактора можно положить к вкладкам
+                // её же области или рядом с ней, а в середине своей области она вернётся на место.
+                Target::Area { key, area, .. } if key == drag.src && area == drag.area && !carry => Target::Nothing,
                 t => t,
             };
+            let home = matches!(target, Target::Area { key, area, zone: Zone::Center } if key == drag.src && area == drag.area);
             if drag.released {
                 let drag = self.rt.drag.take().expect("проверено выше");
                 match target {
-                    Target::Nothing if drag.carry => viewer.carry_cancel(),
-                    Target::Nothing => {}
-                    to if drag.carry => self.rt.ops.push(Op::Carry { from: (drag.src, drag.area), to, size: drag.size }),
+                    _ if carry && home => viewer.carry_cancel(),
+                    Target::Nothing if carry => viewer.carry_cancel(),
+                    Target::Nothing | Target::Header { .. } if !carry => {}
+                    to if carry => self.rt.ops.push(Op::Carry { from: (drag.src, drag.area), to, size: drag.size }),
                     Target::NewWindow(p) => self.rt.ops.push(Op::Detach {
                         key: drag.src,
                         area: drag.area,
@@ -593,7 +652,7 @@ impl<T> DockState<T> {
                     }
                     Target::Empty(tk) => surface_ref(main, &self.windows, tk).is_some_and(Surface::is_empty),
                     Target::NewWindow(_) => true,
-                    Target::Nothing => false,
+                    Target::Header { .. } | Target::Nothing => false,
                 };
                 if !valid {
                     return;
@@ -620,7 +679,7 @@ impl<T> DockState<T> {
                         self.rt.focused.insert(tk, area);
                     }
                     Target::NewWindow(p) => self.spawn_window(moved.editor, Some(p), DEFAULT_WINDOW),
-                    Target::Nothing => {}
+                    Target::Header { .. } | Target::Nothing => {}
                 }
             }
             Op::Carry { from: (key, area), to, size } => self.carry(main, key, area, to, size, viewer),
@@ -698,7 +757,7 @@ impl<T> DockState<T> {
         // Не получилось положить — часть возвращается туда, откуда её взяли.
         let mut back: Option<T> = None;
         match to {
-            Target::Area { key: tk, area: ta, zone: Zone::Center } => match surface_mut(main, &mut self.windows, tk).and_then(|s| s.area_mut(ta)) {
+            Target::Area { key: tk, area: ta, zone: Zone::Center } | Target::Header { key: tk, area: ta } => match surface_mut(main, &mut self.windows, tk).and_then(|s| s.area_mut(ta)) {
                 Some(target) => {
                     if let Err(part) = viewer.carry_merge(&mut target.editor, part) {
                         back = Some(part);
@@ -733,7 +792,12 @@ impl<T> DockState<T> {
                     None => back = Some(part),
                 }
             }
-            Target::NewWindow(p) => self.spawn_window(part, Some(p - vec2(24.0, 14.0)), size),
+            // Как в IDE от JetBrains: окно размером с исходную область, по центру под курсором
+            // (но заголовком не выше края экрана).
+            Target::NewWindow(p) => {
+                let at = p - window_size(size) / 2.0;
+                self.spawn_window(part, Some(pos2(at.x, at.y.max(0.0))), size);
+            }
             Target::Nothing => back = Some(part),
         }
         if let Some(part) = back
@@ -771,7 +835,7 @@ impl<T> DockState<T> {
     fn spawn_window(&mut self, editor: T, pos: Option<Pos2>, size: Vec2) {
         let id = self.new_area_id().0;
         let area = self.new_area_id();
-        let size = vec2(size.x.max(360.0), size.y.max(240.0));
+        let size = window_size(size);
         self.windows.push(FloatWindow {
             id,
             surface: Surface::new(Node::area(area, editor)),
@@ -782,8 +846,13 @@ impl<T> DockState<T> {
     }
 }
 
+/// Размер нового отдельного окна для области размера `size`.
+fn window_size(size: Vec2) -> Vec2 {
+    vec2(size.x.max(360.0), size.y.max(240.0))
+}
+
 /// Куда упадёт область, если отпустить её в точке `p` (экранные координаты).
-fn compute_target(rects: &[SurfaceRects], p: Pos2) -> Target {
+fn compute_target(rects: &[SurfaceRects], p: Pos2, carry: bool) -> Target {
     // Отдельные окна обычно лежат поверх главного, поэтому проверяем их первыми.
     let ordered = rects.iter().rev().filter(|s| s.key != SurfaceKey::Main).chain(rects.iter().filter(|s| s.key == SurfaceKey::Main));
     for s in ordered {
@@ -791,7 +860,17 @@ fn compute_target(rects: &[SurfaceRects], p: Pos2) -> Target {
             continue;
         }
         for a in &s.areas {
-            if a.full().contains(p) {
+            // Часть редактора (вкладку): над заголовком — к вкладкам области, над содержимым —
+            // рядом с областью или в её середину, как в IDE от JetBrains.
+            if carry {
+                if a.header.contains(p) {
+                    return if a.accepts { Target::Header { key: s.key, area: a.id } } else { Target::Nothing };
+                }
+                if a.body.contains(p) {
+                    let zone = carry_zone(a.full(), p);
+                    return if zone == Zone::Center && !a.accepts { Target::Nothing } else { Target::Area { key: s.key, area: a.id, zone } };
+                }
+            } else if a.full().contains(p) {
                 return Target::Area { key: s.key, area: a.id, zone: zone_at(a.full(), p) };
             }
         }
@@ -813,6 +892,28 @@ fn zone_at(rect: Rect, p: Pos2) -> Zone {
         Zone::Top
     } else {
         Zone::Bottom
+    }
+}
+
+/// Зона области для вынесенной вкладки, как в IDE от JetBrains (`TabsUtil.getDropSideFor`):
+/// внутренний прямоугольник без полос по [`CARRY_EDGE`] от краёв — середина, иначе — ближайший
+/// край (при равенстве — правый, левый, нижний, верхний).
+fn carry_zone(rect: Rect, p: Pos2) -> Zone {
+    let rel = (p - rect.min) / rect.size().max(vec2(1.0, 1.0));
+    let (x, y) = (rel.x.clamp(0.0, 1.0), rel.y.clamp(0.0, 1.0));
+    let r = CARRY_EDGE;
+    if (r..=1.0 - r).contains(&x) && (r..=1.0 - r).contains(&y) {
+        return Zone::Center;
+    }
+    let (left, right, top, bottom) = (x, 1.0 - x, y, 1.0 - y);
+    if right <= top && right <= bottom && right <= left {
+        Zone::Right
+    } else if left <= top && left <= bottom {
+        Zone::Left
+    } else if bottom <= top {
+        Zone::Bottom
+    } else {
+        Zone::Top
     }
 }
 
@@ -904,6 +1005,8 @@ fn corner_action(areas: &[AreaRects], src: AreaId, corner: Pos2, p: Pos2, dir: &
 struct Frame0 {
     key: SurfaceKey,
     areas: Vec<AreaRects>,
+    /// Где окно на экране (левый верхний угол содержимого).
+    offset: Vec2,
 }
 
 impl<T> DockState<T> {
@@ -916,7 +1019,9 @@ impl<T> DockState<T> {
         let rect = full.shrink(GAP);
         // Зазоры — цветом зазора (им же закрашиваются углы областей).
         ui.painter().rect_filled(full, CornerRadius::ZERO, style.gap_bg);
-        let mut frame = Frame0 { key, areas: Vec::new() };
+        let window = ctx.input(|i| i.viewport().inner_rect);
+        let mut frame = Frame0 { key, areas: Vec::new(), offset: window.map_or(Vec2::ZERO, |w| w.min.to_vec2()) };
+        self.take_shot(ui, key);
 
         match &mut surface.root {
             None => self.empty_surface(ui, key, rect, viewer, style),
@@ -945,14 +1050,13 @@ impl<T> DockState<T> {
         self.track_pick(ui, key, &frame, rect, style);
 
         // Экранные координаты окна: от них считаются броски между окнами.
-        let window = ctx.input(|i| i.viewport().inner_rect);
         if let Some(window) = window {
             let offset = window.min.to_vec2();
             let shift = |r: Rect| r.translate(offset);
             self.rt.rects.push(SurfaceRects {
                 key,
                 window,
-                areas: frame.areas.iter().map(|a| AreaRects { id: a.id, header: shift(a.header), body: shift(a.body) }).collect(),
+                areas: frame.areas.iter().map(|a| AreaRects { id: a.id, header: shift(a.header), body: shift(a.body), accepts: a.accepts }).collect(),
             });
         }
 
@@ -1107,8 +1211,11 @@ impl<T> DockState<T> {
             drag.released = true;
         }
         ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-        // «Призрак» области у курсора, пока курсор над окном-источником.
-        if let Some(p) = local.filter(|p| ui.ctx().content_rect().contains(*p)) {
+        // «Призрак» области у курсора, пока курсор над окном-источником. У вынесенной вкладки
+        // своё превью — отдельным окном (см. `show_preview`).
+        if drag.carry.is_none()
+            && let Some(p) = local.filter(|p| ui.ctx().content_rect().contains(*p))
+        {
             let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::new("forma-dock-ghost")));
             let galley = painter.layout_no_wrap(drag.title.clone(), FontId::proportional(13.0), style.text_strong);
             let r = Rect::from_min_size(p + vec2(14.0, 10.0), galley.size() + vec2(20.0, 10.0));
@@ -1117,14 +1224,121 @@ impl<T> DockState<T> {
         }
     }
 
+    /// Снимок окна для превью вынесенной вкладки пришёл: из него вырезается содержимое
+    /// области и уменьшается до [`PREVIEW_SIDE`].
+    fn take_shot(&mut self, ui: &Ui, key: SurfaceKey) {
+        let Some(Drag { src, carry: Some(c), .. }) = &mut self.rt.drag else { return };
+        let Shot::Waiting { body } = c.shot else { return };
+        if *src != key {
+            return;
+        }
+        let image = ui.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Screenshot { user_data, image, .. } if user_data.data.as_ref().is_some_and(|d| d.is::<DockShot>()) => Some(image.clone()),
+                _ => None,
+            })
+        });
+        let Some(image) = image else { return };
+        c.shot = match shrink(&image, body, ui.ctx().pixels_per_point()) {
+            Some(small) => Shot::Ready(ui.ctx().load_texture("forma-dock-preview", small, egui::TextureOptions::LINEAR)),
+            None => Shot::Missing,
+        };
+    }
+
+    /// Превью вынесенной вкладки у курсора — отдельное окно поверх всех, как в IDE от
+    /// JetBrains: видно и над окнами программы, и над рабочим столом. Над строкой вкладок —
+    /// сама вкладка, иначе — уменьшенный снимок области, из которой её вынесли.
+    fn show_preview(&mut self, ctx: &Context, style: &DockStyle) {
+        let over_tabs = matches!(self.rt.target, Target::Header { .. });
+        let Some(drag) = &mut self.rt.drag else { return };
+        let (Some(c), Some(p)) = (&mut drag.carry, drag.pointer) else { return };
+        if drag.released || drag.cancelled {
+            return;
+        }
+        c.frames += 1;
+        // Снимок так и не пришёл (окно свёрнуто, ошибка видеокарты) — обходимся вкладкой.
+        if c.frames > 30 && matches!(c.shot, Shot::Waiting { .. }) {
+            c.shot = Shot::Missing;
+        }
+        let thumb = match &c.shot {
+            Shot::Ready(tex) if !over_tabs => Some(tex.clone()),
+            _ => None,
+        };
+        let galley = ctx.fonts_mut(|f| f.layout_no_wrap(c.info.title.clone(), FontId::proportional(13.0), style.text_strong));
+        let ppp = ctx.pixels_per_point();
+        let size = match &thumb {
+            Some(tex) => tex.size_vec2() / ppp,
+            None => vec2(8.0 + 14.0 + 6.0 + galley.size().x + 12.0, HEADER_H),
+        };
+        // Проверки с тестовым вводом (FORMA_TEST_INPUT) идут в окне, спрятанном под другими:
+        // их превью уводится за край экрана и не всплывает поверх чужих окон.
+        static TESTING: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| std::env::var_os("FORMA_TEST_INPUT").is_some());
+        let away = if *TESTING { vec2(-30000.0, 0.0) } else { Vec2::ZERO };
+        let mut builder = ViewportBuilder::default()
+            .with_title(c.info.title.clone())
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_taskbar(false)
+            .with_active(false)
+            // Окно показывается со второго кадра, когда в нём уже что-то нарисовано.
+            .with_visible(c.frames > 1)
+            .with_position(p - size / 2.0 + away)
+            .with_inner_size(size);
+        if !*TESTING {
+            builder = builder.with_always_on_top();
+        }
+        let icon = c.info.icon.clone();
+        ctx.show_viewport_immediate(ViewportId::from_hash_of("forma-dock-preview"), builder, |ui, _class| {
+            let rect = ui.ctx().content_rect();
+            let painter = ui.ctx().layer_painter(egui::LayerId::background());
+            match &thumb {
+                Some(tex) => {
+                    painter.image(tex.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                }
+                None => {
+                    // Вкладка, как в строке вкладок: значок, имя и полоска выбранной вкладки.
+                    painter.rect_filled(rect, CornerRadius::ZERO, style.header_bg);
+                    painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, style.border), StrokeKind::Inside);
+                    let cy = rect.center().y;
+                    let icon_rect = Rect::from_center_size(pos2(rect.left() + 15.0, cy), vec2(14.0, 14.0));
+                    (style.paint_icon)(&painter, icon_rect, &icon, style.text_muted);
+                    painter.galley(pos2(icon_rect.right() + 6.0, cy - galley.size().y / 2.0), galley.clone(), style.text_strong);
+                    let bar = Rect::from_min_max(pos2(rect.left() + 3.0, rect.bottom() - 2.0), pos2(rect.right() - 3.0, rect.bottom()));
+                    painter.rect_filled(bar, CornerRadius::same(1), style.accent);
+                }
+            }
+        });
+    }
+
     fn paint_drop_overlay(&self, ui: &Ui, frame: &Frame0, surface_rect: Rect, style: &DockStyle) {
         if self.rt.drag.is_none() {
             return;
         }
         let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("forma-dock-overlay")));
+        let carry = self.rt.drag.as_ref().is_some_and(|d| d.carry.is_some());
+        // Пока окно снимается для превью, подсветки нет — иначе она попала бы в снимок.
+        if self.rt.drag.as_ref().is_some_and(|d| matches!(d.carry, Some(Carried { shot: Shot::Waiting { .. }, .. }))) {
+            return;
+        }
         let fill = style.accent.gamma_multiply(0.22);
         let stroke = Stroke::new(1.5, style.accent.gamma_multiply(0.9));
         match self.rt.target {
+            // Вкладку кладут в содержимое области: подсвечена его часть, просто заливкой, как в
+            // IDE от JetBrains. Нижние углы скруглены вместе с областью.
+            Target::Area { key, area, zone } if key == frame.key && carry => {
+                if let Some(a) = frame.areas.iter().find(|a| a.id == area) {
+                    let r = zone_rect(a.body, zone);
+                    let round = |at_bottom: bool, at_side: bool| if at_bottom && at_side { RADIUS } else { 0 };
+                    let bottom = r.bottom() >= a.body.bottom() - 0.5;
+                    let corners = CornerRadius {
+                        nw: 0,
+                        ne: 0,
+                        sw: round(bottom, r.left() <= a.body.left() + 0.5),
+                        se: round(bottom, r.right() >= a.body.right() - 0.5),
+                    };
+                    painter.rect_filled(r, corners, style.drop_fill);
+                }
+            }
             Target::Area { key, area, zone } if key == frame.key => {
                 if let Some(a) = frame.areas.iter().find(|a| a.id == area) {
                     painter.rect(zone_rect(a.full(), zone).shrink(3.0), CornerRadius::same(RADIUS), fill, stroke, StrokeKind::Inside);
@@ -1233,7 +1447,7 @@ impl<T> DockState<T> {
         // перетаскивание — перенести область в другое место или окно.
         let head = ui.interact(header, Id::new(("forma-dock-header", area.id)), Sense::click_and_drag());
         if head.drag_started() && self.idle() {
-            self.rt.drag = Some(Drag { src: key, area: area.id, title: viewer.title(&area.editor), pointer: None, released: false, size: rect.size(), carry: false, cancelled: false });
+            self.rt.drag = Some(Drag { src: key, area: area.id, title: viewer.title(&area.editor), pointer: None, released: false, size: rect.size(), carry: None, cancelled: false });
         }
         if head.double_clicked() {
             self.rt.ops.push(Op::ToggleMaximize { key, area: area.id });
@@ -1290,12 +1504,21 @@ impl<T> DockState<T> {
             child.set_clip_rect(content.intersect(ui.clip_rect()));
             // Подписи не выделяются мышью: иначе за них не потянуть заголовок.
             child.style_mut().interaction.selectable_labels = false;
+            // Над заголовком идёт перенос вкладки — программа раздвигает вкладки.
+            let over = match (&self.rt.drag, self.rt.target) {
+                (Some(d), Target::Header { key: k, area: a }) if d.carry.is_some() && k == key && a == area.id => d.pointer.map(|p| p - frame.offset),
+                _ => None,
+            };
+            viewer.carry_over(&mut area.editor, over);
             viewer.header(&mut child, &mut area.editor);
-            // Программа вынесла часть редактора из заголовка (вкладку) — дальше перенос ведёт раскладка.
+            // Программа вынесла часть редактора из заголовка (вкладку) — дальше перенос ведёт
+            // раскладка. Для превью у курсора окно снимается (снимок придёт в следующих кадрах).
             if self.idle()
-                && let Some(title) = viewer.carry_started(&mut area.editor)
+                && let Some(info) = viewer.carry_started(&mut area.editor)
             {
-                self.rt.drag = Some(Drag { src: key, area: area.id, title, pointer: None, released: false, size: rect.size(), carry: true, cancelled: false });
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(DockShot)));
+                let carry = Carried { info: info.clone(), shot: Shot::Waiting { body }, frames: 0 };
+                self.rt.drag = Some(Drag { src: key, area: area.id, title: info.title, pointer: None, released: false, size: rect.size(), carry: Some(carry), cancelled: false });
             }
         }
 
@@ -1318,7 +1541,8 @@ impl<T> DockState<T> {
         if !maximized {
             self.corners(ui, key, area.id, rect, style);
         }
-        frame.areas.push(AreaRects { id: area.id, header, body });
+        let accepts = viewer.accepts_carry(&area.editor);
+        frame.areas.push(AreaRects { id: area.id, header, body, accepts });
     }
 
     /// Четыре уголка области: за них тянут, чтобы разделить, объединить, поменять местами
@@ -1451,6 +1675,41 @@ fn kind_menu(ui: &mut Ui, groups: &[KindGroup], current: Option<&str>, style: &D
     picked
 }
 
+/// Вырезает из снимка окна прямоугольник `rect` (в точках) и уменьшает его так, чтобы большая
+/// сторона стала [`PREVIEW_SIDE`] точек. Пиксели усредняются: при простом выборе каждого
+/// N-го пикселя мелкий текст рассыпался бы.
+fn shrink(image: &egui::ColorImage, rect: Rect, ppp: f32) -> Option<egui::ColorImage> {
+    let [iw, ih] = image.size;
+    let px = |v: f32, max: usize| ((v * ppp).round().max(0.0) as usize).min(max);
+    let (x0, y0, x1, y1) = (px(rect.left(), iw), px(rect.top(), ih), px(rect.right(), iw), px(rect.bottom(), ih));
+    let (w, h) = (x1.checked_sub(x0)?, y1.checked_sub(y0)?);
+    if w < 2 || h < 2 {
+        return None;
+    }
+    let side = (PREVIEW_SIDE * ppp).round().max(1.0);
+    let scale = side / w.max(h) as f32;
+    let (tw, th) = (((w as f32 * scale).round() as usize).max(1), ((h as f32 * scale).round() as usize).max(1));
+    let mut pixels = Vec::with_capacity(tw * th);
+    for ty in 0..th {
+        let (sy0, sy1) = (y0 + ty * h / th, y0 + (ty + 1) * h / th);
+        for tx in 0..tw {
+            let (sx0, sx1) = (x0 + tx * w / tw, x0 + (tx + 1) * w / tw);
+            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+            for sy in sy0..sy1.max(sy0 + 1).min(ih) {
+                for c in &image.pixels[sy * iw + sx0..(sy * iw + sx1.max(sx0 + 1)).min(sy * iw + iw)] {
+                    r += u32::from(c.r());
+                    g += u32::from(c.g());
+                    b += u32::from(c.b());
+                    n += 1;
+                }
+            }
+            let n = n.max(1);
+            pixels.push(Color32::from_rgb((r / n) as u8, (g / n) as u8, (b / n) as u8));
+        }
+    }
+    Some(egui::ColorImage::new([tw, th], pixels))
+}
+
 /// Закрашивает цветом зазора всё, что содержимое нарисовало за скруглёнными углами области.
 fn round_corners(painter: &egui::Painter, rect: Rect, color: Color32) {
     const STEPS: usize = 8;
@@ -1500,7 +1759,7 @@ mod tests {
 
     fn area_rects(id: u64, body: Rect) -> AreaRects {
         let header = Rect::from_min_size(body.min - vec2(0.0, HEADER_H), vec2(body.width(), HEADER_H));
-        AreaRects { id: AreaId(id), header, body }
+        AreaRects { id: AreaId(id), header, body, accepts: true }
     }
 
     #[test]
@@ -1526,15 +1785,59 @@ mod tests {
             areas: vec![area_rects(2, Rect::from_min_size(pos2(500.0, 330.0), vec2(400.0, 270.0)))],
         };
         let rects = vec![main, float];
-        assert!(matches!(compute_target(&rects, pos2(700.0, 450.0)), Target::Area { key: SurfaceKey::Window(9), .. }));
-        assert!(matches!(compute_target(&rects, pos2(100.0, 400.0)), Target::Area { key: SurfaceKey::Main, .. }));
-        assert_eq!(compute_target(&rects, pos2(1500.0, 400.0)), Target::NewWindow(pos2(1500.0, 400.0)));
+        assert!(matches!(compute_target(&rects, pos2(700.0, 450.0), false), Target::Area { key: SurfaceKey::Window(9), .. }));
+        assert!(matches!(compute_target(&rects, pos2(100.0, 400.0), false), Target::Area { key: SurfaceKey::Main, .. }));
+        assert_eq!(compute_target(&rects, pos2(1500.0, 400.0), false), Target::NewWindow(pos2(1500.0, 400.0)));
         assert_eq!(
-            compute_target(&rects, pos2(160.0, 20.0)),
+            compute_target(&rects, pos2(160.0, 20.0), false),
             Target::Area { key: SurfaceKey::Main, area: AreaId(1), zone: Zone::Top },
             "заголовок — часть области"
         );
-        assert_eq!(compute_target(&rects, pos2(2.0, 2.0)), Target::Nothing, "над рамкой окна — ничего");
+        assert_eq!(compute_target(&rects, pos2(2.0, 2.0), false), Target::Nothing, "над рамкой окна — ничего");
+    }
+
+    #[test]
+    fn carried_tab_goes_to_tabs_over_the_header_and_beside_over_the_body() {
+        let mut a = area_rects(1, Rect::from_min_size(pos2(10.0, 40.0), vec2(980.0, 750.0)));
+        let main = |a: AreaRects| vec![SurfaceRects { key: SurfaceKey::Main, window: Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 800.0)), areas: vec![a] }];
+        let rects = main(area_rects(1, a.body));
+        assert_eq!(compute_target(&rects, pos2(900.0, 25.0), true), Target::Header { key: SurfaceKey::Main, area: AreaId(1) }, "весь заголовок, и правее вкладок тоже");
+        assert_eq!(compute_target(&rects, pos2(500.0, 400.0), true), Target::Area { key: SurfaceKey::Main, area: AreaId(1), zone: Zone::Center });
+        assert_eq!(compute_target(&rects, pos2(950.0, 400.0), true), Target::Area { key: SurfaceKey::Main, area: AreaId(1), zone: Zone::Right });
+        // Редактор, который вкладок не принимает (дерево проекта): только рядом с ним.
+        a.accepts = false;
+        let rects = main(a);
+        assert_eq!(compute_target(&rects, pos2(900.0, 25.0), true), Target::Nothing);
+        assert_eq!(compute_target(&rects, pos2(500.0, 400.0), true), Target::Nothing);
+        assert_eq!(compute_target(&rects, pos2(950.0, 400.0), true), Target::Area { key: SurfaceKey::Main, area: AreaId(1), zone: Zone::Right });
+    }
+
+    #[test]
+    fn carry_zones_follow_the_jetbrains_rule() {
+        let r = Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 500.0));
+        let at = |x: f32, y: f32| carry_zone(r, pos2(x * 1000.0, y * 500.0));
+        assert_eq!(at(0.5, 0.5), Zone::Center);
+        assert_eq!(at(0.25, 0.5), Zone::Center, "середина — всё, что дальше 20 % от краёв");
+        assert_eq!(at(0.9, 0.5), Zone::Right);
+        assert_eq!(at(0.1, 0.5), Zone::Left);
+        assert_eq!(at(0.5, 0.1), Zone::Top);
+        assert_eq!(at(0.5, 0.9), Zone::Bottom);
+        assert_eq!(at(0.05, 0.15), Zone::Left, "в углу — ближайший край");
+        assert_eq!(at(0.15, 0.05), Zone::Top);
+        assert_eq!(at(0.1, 0.1), Zone::Left, "поровну — левый раньше верхнего");
+        assert_eq!(at(0.9, 0.9), Zone::Right, "поровну — правый раньше нижнего");
+    }
+
+    #[test]
+    fn preview_shrinks_to_220_points_by_averaging() {
+        // Окно 100×50 пикселей при масштабе 1: слева белое, справа чёрное.
+        let pixels = (0..50).flat_map(|_| (0..100).map(|x| if x < 50 { Color32::WHITE } else { Color32::BLACK })).collect();
+        let image = egui::ColorImage::new([100, 50], pixels);
+        let small = shrink(&image, Rect::from_min_size(pos2(0.0, 0.0), vec2(100.0, 50.0)), 1.0).expect("есть что показать");
+        assert_eq!(small.size, [220, 110], "большая сторона — 220");
+        assert_eq!(small.pixels[0], Color32::WHITE);
+        assert_eq!(small.pixels[219], Color32::BLACK);
+        assert!(shrink(&image, Rect::from_min_size(pos2(200.0, 0.0), vec2(10.0, 10.0)), 1.0).is_none(), "за краем снимка — ничего");
     }
 
     /// Две области рядом: 1 слева (0..400), 2 справа (404..800), обе высотой 600.

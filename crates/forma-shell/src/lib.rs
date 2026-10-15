@@ -22,6 +22,7 @@ pub mod look;
 pub mod plugins;
 pub mod settings;
 mod shell;
+mod test_input;
 pub mod workspace;
 
 pub use settings::{AppPage, AppSettings, PlatformSettings};
@@ -89,7 +90,8 @@ where
         options,
         Box::new(move |cc| {
             let shell = Shell::new(cc, spec, settings, app_settings, store, registry);
-            Ok(Box::new(make(cc, shell)))
+            // С FORMA_TEST_INPUT программа принимает ввод из файла (для проверок).
+            Ok(Box::new(test_input::TestInput::wrap(make(cc, shell))))
         }),
     );
 

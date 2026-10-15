@@ -478,6 +478,12 @@ impl Theme {
 }
 
 impl Palette {
+    /// Заливка места, куда упадёт перетаскиваемое (вкладка — в область или в строку вкладок),
+    /// как `DragAndDrop.areaBackground` в IDE от JetBrains: в тёмной теме — белый на 20 %.
+    pub fn drop_fill(&self) -> Color32 {
+        if self.dark { Color32::from_white_alpha(51) } else { self.accent.gamma_multiply(0.25) }
+    }
+
     /// Оформление областей и вкладок для составного интерфейса.
     /// Иконку передаём готовой: рисовать её на каждом кадре дорого.
     pub fn dock_style(&self, app_title: &str, icon: Arc<egui::IconData>, maximize_keys: Vec<egui::KeyboardShortcut>, maximize_text: String) -> DockStyle {
@@ -491,6 +497,7 @@ impl Palette {
             text_strong: self.tab_active_text,
             accent: self.tab_indicator,
             border: self.area_border,
+            drop_fill: self.drop_fill(),
             menu_style,
             paint_icon: crate::icons::paint,
             icon: Some(icon),

@@ -7,5 +7,5 @@
 mod dock;
 pub mod tree;
 
-pub use dock::{DockState, DockStyle, EditorKind, EditorViewer, FloatWindow, KindGroup, Place, SurfaceKey};
+pub use dock::{CarryInfo, DockState, DockStyle, EditorKind, EditorViewer, FloatWindow, KindGroup, Place, SurfaceKey};
 pub use tree::{Area, AreaId, Node, SplitDir, Surface, Zone};
