@@ -1,17 +1,21 @@
 //! Плагины платформы Forma: всё большое и необязательное — языковые серверы, среды
 //! выполнения, наборы тем — ставится и убирается одной кнопкой.
 //!
-//! Плагин — папка `<plugins>/<id>` с `plugin.toml` (см. [`manifest`]) и содержимым.
-//! Что можно поставить, программа описывает каталогом ([`CatalogEntry`]): откуда взять
-//! архив и как проверить, что он годный, или какие файлы плагин везёт в самой программе
-//! (так устроены небольшие наборы тем). Наборы тем и другие плагины не из каталога
-//! ставятся из `.zip` с `plugin.toml` внутри.
+//! Плагин — папка `<plugins>/<id>` с `forma-plugin.toml` (см. [`manifest`]) и содержимым, а
+//! в пути — архив `.fpl` (обычный zip, как `.jar` у модов). Что можно поставить, программа
+//! описывает каталогом ([`CatalogEntry`]): откуда взять архив и как проверить, что он годный,
+//! или какие файлы плагин везёт в самой программе (так устроены небольшие наборы тем).
+//! Остальное ставится из `.fpl` (или `.zip`): сначала [`Plugins::prepare`] показывает, что
+//! плагин приносит и что просит, потом [`Plugins::commit`] ставит его. Плагин в разработке
+//! подключается прямо из своей папки ([`Plugins::set_dev_dirs`]). Подходит ли плагин
+//! программе и все ли зависимости на месте, проверяет [`loader::check`].
 //!
 //! Архивы скачиваются и распаковываются системными `curl` и `tar` (в Windows 10+ они есть
 //! в System32), так платформе не нужны свои HTTP-, TLS- и zip-библиотеки. Установка идёт
 //! в отдельной папке и только в конце подменяет прежнюю версию: прерванная установка
 //! ничего не ломает.
 
+pub mod loader;
 pub mod manifest;
 
 use std::collections::HashMap;
@@ -21,7 +25,8 @@ use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
-pub use manifest::{Contributes, Kind, Manifest, Meta};
+pub use loader::{Problem, Report, check};
+pub use manifest::{Contributes, Kind, LEGACY_MANIFEST, MANIFEST, Manifest, Meta, Permissions};
 
 /// Откуда берётся плагин из каталога.
 #[derive(Clone, Debug, PartialEq)]
@@ -66,6 +71,25 @@ pub struct CatalogEntry {
 pub struct Installed {
     pub manifest: Manifest,
     pub dir: PathBuf,
+    /// Подключён из папки разработчика, а не установлен.
+    pub dev: bool,
+}
+
+/// Распакованный, но ещё не поставленный плагин: программа показывает, что он приносит и что
+/// просит (права), и ставит его только после согласия.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pending {
+    pub manifest: Manifest,
+    /// Папка плагина во временной папке установки.
+    dir: PathBuf,
+}
+
+/// Манифест из папки плагина: новый, а если его нет — прежний `plugin.toml`.
+pub fn read_manifest(dir: &Path) -> Result<Manifest, String> {
+    let text = std::fs::read_to_string(dir.join(MANIFEST))
+        .or_else(|_| std::fs::read_to_string(dir.join(LEGACY_MANIFEST)))
+        .map_err(|_| format!("no {MANIFEST} in {}", dir.display()))?;
+    Manifest::parse(&text)
 }
 
 impl Installed {
@@ -108,6 +132,8 @@ enum JobState {
 pub struct PluginSettings {
     pub disabled: Vec<String>,
     pub installed: Vec<String>,
+    /// Папки плагинов в разработке (подключаются без установки).
+    pub dev: Vec<PathBuf>,
 }
 
 impl forma_settings::Component for PluginSettings {
@@ -131,6 +157,8 @@ impl PluginSettings {
 /// Все плагины программы: установленные и идущие установки.
 pub struct Plugins {
     root: Option<PathBuf>,
+    /// Папки плагинов в разработке.
+    dev_dirs: Vec<PathBuf>,
     installed: Vec<Installed>,
     jobs: HashMap<String, Arc<Mutex<JobState>>>,
     /// Последняя ошибка установки по id — показывается, пока не начнётся новая.
@@ -141,7 +169,7 @@ pub struct Plugins {
 impl Plugins {
     /// `root` — папка плагинов: `%LOCALAPPDATA%\Forma\<программа>\plugins`.
     pub fn new(root: Option<PathBuf>) -> Self {
-        let mut p = Self { root, installed: Vec::new(), jobs: HashMap::new(), errors: HashMap::new(), events: Vec::new() };
+        let mut p = Self { root, dev_dirs: Vec::new(), installed: Vec::new(), jobs: HashMap::new(), errors: HashMap::new(), events: Vec::new() };
         p.scan();
         p
     }
@@ -150,24 +178,41 @@ impl Plugins {
         self.root.as_deref()
     }
 
-    /// Перечитывает папку плагинов.
+    /// Папки плагинов в разработке: они подключаются прямо оттуда, без установки, и
+    /// перечитываются вместе с остальными.
+    pub fn set_dev_dirs(&mut self, dirs: Vec<PathBuf>) {
+        if dirs != self.dev_dirs {
+            self.dev_dirs = dirs;
+            self.scan();
+        }
+    }
+
+    /// Перечитывает папку плагинов и папки разработчика.
     pub fn scan(&mut self) {
         self.installed.clear();
-        let Some(root) = &self.root else { return };
-        let Ok(entries) = std::fs::read_dir(root) else { return };
-        for e in entries.flatten() {
-            let dir = e.path();
-            let name = e.file_name().to_string_lossy().into_owned();
-            if !dir.is_dir() || name.starts_with('.') {
-                continue;
-            }
-            match std::fs::read_to_string(dir.join("plugin.toml")).map_err(|e| e.to_string()).and_then(|t| Manifest::parse(&t)) {
-                Ok(manifest) if manifest.plugin.id == name => self.installed.push(Installed { manifest, dir }),
-                Ok(manifest) => log::warn!("Plugin folder {name} holds plugin {}; skipped", manifest.plugin.id),
-                Err(err) => log::warn!("Plugin {name} is broken: {err}"),
+        if let Some(root) = &self.root
+            && let Ok(entries) = std::fs::read_dir(root)
+        {
+            for e in entries.flatten() {
+                let dir = e.path();
+                let name = e.file_name().to_string_lossy().into_owned();
+                if !dir.is_dir() || name.starts_with('.') {
+                    continue;
+                }
+                match read_manifest(&dir) {
+                    Ok(manifest) if manifest.plugin.id == name => self.installed.push(Installed { manifest, dir, dev: false }),
+                    Ok(manifest) => log::warn!("Plugin folder {name} holds plugin {}; skipped", manifest.plugin.id),
+                    Err(err) => log::warn!("Plugin {name} is broken: {err}"),
+                }
             }
         }
-        self.installed.sort_by_key(|p| p.manifest.title().to_lowercase());
+        for dir in &self.dev_dirs {
+            match read_manifest(dir) {
+                Ok(manifest) => self.installed.push(Installed { manifest, dir: dir.clone(), dev: true }),
+                Err(err) => log::warn!("Plugin in development at {} is broken: {err}", dir.display()),
+            }
+        }
+        self.installed.sort_by_key(|p| (p.manifest.title().to_lowercase(), p.dev));
     }
 
     pub fn installed(&self) -> &[Installed] {
@@ -246,26 +291,41 @@ impl Plugins {
         });
     }
 
-    /// Ставит плагин из `.zip` с `plugin.toml` (в корне архива или в его единственной папке).
-    /// Плагин с тем же id заменяется. Возвращает id.
-    pub fn install_file(&mut self, archive: &Path) -> Result<String, String> {
+    /// Распаковывает `.fpl` (или `.zip`) с манифестом в корне архива или в его единственной
+    /// папке и читает манифест — но пока ничего не ставит (см. [`Self::commit`]).
+    pub fn prepare(&mut self, archive: &Path) -> Result<Pending, String> {
         let root = self.root.clone().ok_or("no plugins folder")?;
         let staging = root.join(".staging").join("from-file");
         let _ = std::fs::remove_dir_all(&staging);
         std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
         extract(archive, &staging)?;
-        let content = single_child(&staging);
-        let text = std::fs::read_to_string(content.join("plugin.toml")).map_err(|_| "the archive has no plugin.toml".to_owned())?;
-        let manifest = Manifest::parse(&text)?;
-        if manifest.plugin.kind == Kind::Tool {
+        let dir = single_child(&staging);
+        let manifest = read_manifest(&dir).map_err(|_| format!("the archive has no {MANIFEST}"))?;
+        if manifest.plugin.kind == Some(Kind::Tool) {
             return Err("tools are installed from the catalog only".into());
         }
-        let id = manifest.plugin.id.clone();
-        replace_dir(&content, &root.join(&id))?;
-        let _ = std::fs::remove_dir_all(&staging);
+        Ok(Pending { manifest, dir })
+    }
+
+    /// Ставит распакованный плагин. Плагин с тем же id заменяется. Возвращает id.
+    pub fn commit(&mut self, pending: Pending) -> Result<String, String> {
+        let root = self.root.clone().ok_or("no plugins folder")?;
+        let id = pending.manifest.plugin.id.clone();
+        let mut manifest = pending.manifest;
+        manifest.plugin.installed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs());
+        let file = if pending.dir.join(MANIFEST).is_file() { MANIFEST } else { LEGACY_MANIFEST };
+        std::fs::write(pending.dir.join(file), manifest.to_toml()).map_err(|e| e.to_string())?;
+        replace_dir(&pending.dir, &root.join(&id))?;
+        let _ = std::fs::remove_dir_all(root.join(".staging").join("from-file"));
         self.scan();
         self.events.push(Event::Installed(id.clone()));
         Ok(id)
+    }
+
+    /// Ставит плагин из `.fpl` или `.zip` сразу, без вопроса о правах. Возвращает id.
+    pub fn install_file(&mut self, archive: &Path) -> Result<String, String> {
+        let pending = self.prepare(archive)?;
+        self.commit(pending)
     }
 
     /// Удаляет плагин с диска. Программа сначала отпускает его файлы (останавливает сервер).
@@ -335,14 +395,16 @@ fn write_manifest(dir: &Path, entry: &CatalogEntry) -> Result<(), String> {
             id: entry.id.to_owned(),
             name: entry.name.clone(),
             version: "latest".into(),
-            kind: entry.kind,
+            kind: Some(entry.kind),
             description: entry.description.clone(),
             author: entry.author.into(),
             license: entry.license.into(),
             homepage: entry.homepage.into(),
             installed: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs()),
+            ..Meta::default()
         },
-        contributes: Contributes { themes: entry.themes.map(Into::into) },
+        contributes: Contributes { themes: entry.themes.map(Into::into), ..Contributes::default() },
+        ..Manifest::default()
     };
     std::fs::write(dir.join("plugin.toml"), manifest.to_toml()).map_err(|e| e.to_string())
 }
@@ -425,6 +487,26 @@ fn download_and_install(root: &Path, entry: &CatalogEntry, url: &str, state: &Mu
     write_manifest(&content, entry)?;
     replace_dir(&content, &root.join(entry.id))?;
     let _ = std::fs::remove_dir_all(&staging);
+    Ok(())
+}
+
+/// Упаковывает папку плагина в `.fpl` — zip системным `tar` (Windows 10+, macOS, bsdtar).
+/// Файлы и папки с точкой в начале и `target` не попадают в архив.
+pub fn pack(dir: &Path, out: &Path) -> Result<(), String> {
+    let manifest = read_manifest(dir)?;
+    let _ = std::fs::remove_file(out);
+    let out_abs = if out.is_absolute() { out.to_path_buf() } else { std::env::current_dir().map_err(|e| e.to_string())?.join(out) };
+    let files: Vec<String> = std::fs::read_dir(dir)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.') && n != "target")
+        .collect();
+    let o = system_tool("tar").args(["--format", "zip", "-c", "-f"]).arg(&out_abs).arg("-C").arg(dir).args(&files).output().map_err(|e| format!("tar: {e}"))?;
+    if !o.status.success() {
+        return Err(format!("tar: {}", String::from_utf8_lossy(&o.stderr).trim()));
+    }
+    log::info!("Packed plugin {} {} into {}", manifest.plugin.id, manifest.plugin.version, out_abs.display());
     Ok(())
 }
 
@@ -525,7 +607,7 @@ id = \"pink\"")] },
         let mut plugins = Plugins::new(Some(base.join("plugins")));
         plugins.install(&pack);
         let p = plugins.get("pink-pack").expect("установлен сразу");
-        assert_eq!(p.manifest.plugin.kind, Kind::Themes);
+        assert_eq!(p.manifest.kind(), Kind::Themes);
         assert!(p.themes_dir().unwrap().join("pink.toml").is_file());
         assert_eq!(plugins.take_events(), vec![Event::Installed("pink-pack".into())]);
         assert!(!base.join("plugins").join(".staging").join("pink-pack").exists(), "черновая папка убрана");
@@ -544,6 +626,36 @@ id = \"pink\"")] },
         assert_eq!(plugins.installed().iter().map(|p| p.id()).collect::<Vec<_>>(), vec!["pink"]);
         assert_eq!(plugins.get("pink").unwrap().themes_dir(), Some(root.join("pink").join("themes")));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn fpl_packs_installs_after_consent_and_dev_folders_load_in_place() {
+        let base = temp("fpl");
+        let src = base.join("studio-theme");
+        std::fs::create_dir_all(src.join("themes")).unwrap();
+        std::fs::create_dir_all(src.join(".git")).unwrap();
+        std::fs::write(src.join(MANIFEST), "[plugin]\nid = \"studio-theme\"\nname = \"Студия\"\nversion = \"1.0.0\"\napps = [\"holotype\"]\n[permissions]\nfiles = [\"vault:read\"]\n[contributes]\nthemes = \"themes\"").unwrap();
+        std::fs::write(src.join("themes").join("studio.toml"), "[theme]\nid = \"studio\"").unwrap();
+        let fpl = base.join("studio-theme.fpl");
+        pack(&src, &fpl).unwrap();
+
+        let mut plugins = Plugins::new(Some(base.join("plugins")));
+        let pending = plugins.prepare(&fpl).unwrap();
+        assert_eq!(pending.manifest.permissions.files, ["vault:read"], "права видны до установки");
+        assert!(plugins.get("studio-theme").is_none(), "до согласия ничего не стоит");
+        assert_eq!(plugins.commit(pending).unwrap(), "studio-theme");
+        let p = plugins.get("studio-theme").unwrap();
+        assert!(p.themes_dir().unwrap().join("studio.toml").is_file());
+        assert!(!p.dir.join(".git").exists(), "служебные папки не попадают в архив");
+        assert!(p.manifest.plugin.installed.is_some());
+
+        // Тот же плагин из папки разработчика — два плагина с одним id.
+        plugins.set_dev_dirs(vec![src.clone()]);
+        assert_eq!(plugins.installed().len(), 2);
+        assert!(plugins.installed().iter().any(|p| p.dev && p.dir == src));
+        let report = check(plugins.installed(), "holotype", |_| true);
+        assert!(report.problems("studio-theme").contains(&Problem::Duplicate));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

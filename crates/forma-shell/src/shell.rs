@@ -88,6 +88,12 @@ impl Spec {
         self.cache_dir().map(|d| d.join("plugins"))
     }
 
+    /// Как программа называется в манифестах плагинов (`apps = ["holotype"]`): id окна без
+    /// `forma-`.
+    pub fn plugin_app(&self) -> &'static str {
+        self.app_id.strip_prefix("forma-").unwrap_or(self.app_id)
+    }
+
     /// Раскладка, когда программа не указала свой файл раскладки.
     pub fn global_layout_path(&self) -> Option<PathBuf> {
         self.config_dir().map(|d| d.join("layout.json"))
@@ -144,11 +150,18 @@ pub enum ShellCmd<B> {
     /// Ctrl+колёсико в редакторе или консоли: размер шрифта на `step` пикселей.
     FontZoom { console: bool, step: f32 },
     InstallPlugin(String),
-    /// Поставить плагин из `.zip` (спросить файл).
+    /// Поставить плагин из `.fpl` или `.zip` (спросить файл).
     InstallPluginFile,
+    /// Показать, что приносит и что просит плагин из этого файла, и поставить с согласия.
+    OfferPlugin(PathBuf),
     UninstallPlugin(String),
     /// Открыть папку плагинов.
     RevealPlugins,
+    /// Подключить папку плагина в разработке (спросить папку).
+    AddPluginFolder,
+    RemovePluginFolder(PathBuf),
+    /// Перечитать плагины.
+    ReloadPlugins,
     About,
     Quit,
 }
@@ -183,6 +196,8 @@ pub(crate) enum Modal<S> {
     Import(Box<ImportDialog>),
     About,
     Rename { index: usize, name: String },
+    /// Поставить плагин из файла: что приносит и что просит.
+    PluginConsent(Box<forma_plugins::Pending>),
 }
 
 /// Уведомление внизу окна.
@@ -242,6 +257,10 @@ pub struct Shell<S: AppSettings, B: Builtin> {
     pub view: serde_json::Value,
     /// Установленные плагины и идущие установки.
     pub plugins: Plugins,
+    /// Что из плагинов работает и чего не хватает остальным (проверка загрузчика).
+    pub plugin_report: forma_plugins::Report,
+    /// Code плагинов (песочница WebAssembly); `None` — песочница не запустилась.
+    pub plugin_runtime: Option<forma_plugin_host::Runtime>,
     /// Экран приветствия вместо рабочего интерфейса.
     pub welcome: bool,
     pub(crate) modal: Option<Modal<S>>,
@@ -279,9 +298,22 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
             o.quit_shortcuts.clear();
         });
         ctx.set_zoom_factor(settings.appearance.zoom.clamp(*ZOOM_RANGE.start(), *ZOOM_RANGE.end()));
-        let plugins = Plugins::new(spec.plugins_dir());
+        let mut plugins = Plugins::new(spec.plugins_dir());
+        plugins.set_dev_dirs(settings.plugins.dev.clone());
+        let plugin_report = crate::plugins::report(&plugins, &settings.plugins, spec.plugin_app());
+        let plugin_runtime = match forma_plugin_host::Runtime::new(spec.plugin_app(), spec.plugins_dir().map(|d| d.join(".data"))) {
+            Ok(mut rt) => {
+                rt.set_language(&settings.appearance.effective_language());
+                rt.sync(plugins.installed(), &plugin_report, false);
+                Some(rt)
+            }
+            Err(e) => {
+                log::error!("Plugin sandbox failed to start: {e}");
+                None
+            }
+        };
         let mut themes = Themes::new(spec.themes, spec.user_themes_dir());
-        themes.set_plugin_dirs(crate::plugins::theme_dirs(&plugins, &settings.plugins));
+        themes.set_plugin_dirs(crate::plugins::theme_dirs(&plugins, &plugin_report));
         let theme = themes.resolve(&settings.appearance.theme, spec.default_theme);
         let pal = theme.pal.clone();
         // Шрифты нужны уже в первом кадре: egui применяет новые шрифты только со следующего.
@@ -320,6 +352,8 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
             layout_file: None,
             view,
             plugins,
+            plugin_report,
+            plugin_runtime,
             welcome: true,
             modal: None,
             app_modal: false,
@@ -376,6 +410,15 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         crate::caption::finish_start(ctx);
         self.apply_style(ctx);
         self.poll_plugins(ctx);
+        // Плагин `.fpl`, брошенный в окно, ставится через окно согласия; программа его не видит.
+        let dropped: Vec<PathBuf> = ctx.input_mut(|i| {
+            let (fpl, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut i.raw.dropped_files).into_iter().partition(|f| f.path().extension().is_some_and(|e| e.eq_ignore_ascii_case("fpl")));
+            i.raw.dropped_files = rest;
+            fpl.into_iter().map(|f| f.path().to_path_buf()).collect()
+        });
+        if let Some(path) = dropped.into_iter().next() {
+            self.cmds.push(ShellCmd::OfferPlugin(path));
+        }
         if self.layout.active >= self.layout.workspaces.len() {
             self.layout.active = 0;
         }
@@ -536,15 +579,39 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
                 }
             }
             ShellCmd::InstallPluginFile => {
-                let file = rfd::FileDialog::new().set_title(t!("dialog-install-plugin")).add_filter("zip", &["zip"]).pick_file();
+                let file = rfd::FileDialog::new().set_title(t!("dialog-install-plugin")).add_filter("Forma", &["fpl", "zip"]).pick_file();
                 if let Some(file) = file {
-                    match self.plugins.install_file(&file) {
-                        Ok(id) => {
-                            let name = self.plugins.get(&id).map(|p| p.manifest.title().to_owned()).unwrap_or(id);
-                            self.toast(t!("toast-plugin-installed", name = name), false);
+                    self.offer_plugin(&file);
+                }
+            }
+            ShellCmd::OfferPlugin(file) => self.offer_plugin(&file),
+            ShellCmd::AddPluginFolder => {
+                if let Some(dir) = rfd::FileDialog::new().set_title(t!("dialog-plugin-folder")).pick_folder()
+                    && !self.settings.plugins.dev.contains(&dir)
+                {
+                    match forma_plugins::read_manifest(&dir) {
+                        Ok(_) => {
+                            self.settings.plugins.dev.push(dir);
+                            self.plugins.set_dev_dirs(self.settings.plugins.dev.clone());
+                            self.settings.save(&mut self.store);
                         }
                         Err(e) => self.toast(t!("toast-plugin-failed", error = e), true),
                     }
+                }
+            }
+            ShellCmd::RemovePluginFolder(dir) => {
+                self.settings.plugins.dev.retain(|d| *d != dir);
+                self.plugins.set_dev_dirs(self.settings.plugins.dev.clone());
+                self.settings.save(&mut self.store);
+            }
+            ShellCmd::ReloadPlugins => {
+                self.plugins.scan();
+                self.themes.scan();
+                self.themes_rev += 1;
+                // Пересобранные модули плагинов в папках разработчика — заново.
+                let report = crate::plugins::report(&self.plugins, &self.settings.plugins, self.spec.plugin_app());
+                if let Some(rt) = &mut self.plugin_runtime {
+                    rt.sync(self.plugins.installed(), &report, true);
                 }
             }
             ShellCmd::UninstallPlugin(id) => {
@@ -678,8 +745,36 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         if self.settings.plugins.installed != installed {
             self.settings.plugins.installed = installed;
         }
-        if self.themes.set_plugin_dirs(crate::plugins::theme_dirs(&self.plugins, &self.settings.plugins)) {
+        // Проверка загрузчика — каждый кадр: плагинов немного, а включения, установки и папки
+        // разработчика меняют её в разных местах.
+        self.plugin_report = crate::plugins::report(&self.plugins, &self.settings.plugins, self.spec.plugin_app());
+        if self.themes.set_plugin_dirs(crate::plugins::theme_dirs(&self.plugins, &self.plugin_report)) {
             self.themes_rev += 1;
+        }
+        // Code плагинов — за работающими плагинами; что плагины сообщают — внизу окна.
+        let language = self.settings.appearance.effective_language();
+        let mut notices = Vec::new();
+        if let Some(rt) = &mut self.plugin_runtime {
+            rt.set_language(&language);
+            rt.sync(self.plugins.installed(), &self.plugin_report, false);
+            notices = rt.take_notices();
+        }
+        for n in notices {
+            let name = self.plugins.get(&n.plugin).map(|p| p.manifest.title().to_owned()).unwrap_or(n.plugin);
+            self.toast(format!("{name}: {}", n.text), n.error);
+        }
+    }
+
+    /// Распаковывает плагин из файла и показывает окно согласия: что он приносит и что просит.
+    fn offer_plugin(&mut self, file: &std::path::Path) {
+        match self.plugins.prepare(file) {
+            Ok(pending) => {
+                self.modal = Some(Modal::PluginConsent(Box::new(pending)));
+                self.modal_focus = true;
+                // Файл бросили в окно без движения мыши — окно должно показаться сразу.
+                self.ctx.request_repaint();
+            }
+            Err(e) => self.toast(t!("toast-plugin-failed", error = e), true),
         }
     }
 }

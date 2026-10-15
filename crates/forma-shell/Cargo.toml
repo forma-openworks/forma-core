@@ -12,6 +12,7 @@ forma-ui.workspace = true
 forma-actions.workspace = true
 forma-settings.workspace = true
 forma-plugins.workspace = true
+forma-plugin-host.workspace = true
 eframe.workspace = true
 wgpu.workspace = true
 rfd.workspace = true

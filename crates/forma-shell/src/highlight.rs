@@ -52,7 +52,10 @@ pub fn find(lang: &str) -> Option<&'static SyntaxReference> {
         "gd" | "gdscript" | "godot" => "gd",
         "py" | "python3" | "py3" => "py",
         "sh" | "shell" | "zsh" | "console" | "terminal" => "bash",
-        "ps" | "ps1" | "pwsh" | "powershell" | "bat" | "cmd" => "bat",
+        // Своего синтаксиса PowerShell в наборе нет (с fancy-regex его не собрать): у Bash те
+        // же `$переменные`, `#комментарии` и строки — ближе, чем у Batch.
+        "ps" | "ps1" | "psm1" | "pwsh" | "powershell" => "bash",
+        "bat" | "cmd" => "bat",
         "yml" => "yaml",
         "md" => "markdown",
         "rs" => "rs",

@@ -1,6 +1,6 @@
 [package]
 name = "forma-plugins"
-description = "Платформа Forma: плагины — установка, удаление, включение, каталог программы"
+description = "Платформа Forma: плагины — формат .fpl и манифест, установка, проверка зависимостей и прав, каталог программы"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +9,7 @@ license.workspace = true
 serde.workspace = true
 log.workspace = true
 toml = "1.1"
+semver = { version = "1", features = ["serde"] }
 forma-settings.workspace = true
 
 [dev-dependencies]

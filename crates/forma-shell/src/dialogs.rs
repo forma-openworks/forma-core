@@ -88,6 +88,9 @@ pub(crate) fn plugin_cmd<B>(action: plugins_page::Action) -> ShellCmd<B> {
         plugins_page::Action::InstallFile => ShellCmd::InstallPluginFile,
         plugins_page::Action::Uninstall(id) => ShellCmd::UninstallPlugin(id),
         plugins_page::Action::OpenFolder => ShellCmd::RevealPlugins,
+        plugins_page::Action::AddDevFolder => ShellCmd::AddPluginFolder,
+        plugins_page::Action::RemoveDevFolder(dir) => ShellCmd::RemovePluginFolder(dir),
+        plugins_page::Action::Reload => ShellCmd::ReloadPlugins,
     }
 }
 
@@ -179,6 +182,12 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         let SettingsDialog { window, draft, app, keymap, fonts, plugins: plugins_ui } = d;
         let actions = &self.actions;
         let plugins = &self.plugins;
+        let report = &self.plugin_report;
+        // Чей code программа остановила — со страницы «Плагины» видно, почему.
+        let failures: Vec<(String, String)> = match &self.plugin_runtime {
+            Some(rt) => plugins.installed().iter().filter_map(|p| rt.failure(p.id()).map(|e| (p.id().to_owned(), e))).collect(),
+            None => Vec::new(),
+        };
         let catalog = self.spec.catalog();
         let mut plugin_actions = Vec::new();
         let mut appearance_action = None;
@@ -188,7 +197,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
             theme_tools::INSPECTOR_PAGE => theme_tools::inspector(ui, pal, search, &draft_theme, &kit),
             font_page::PAGE => fonts.ui(ui, pal, search, &mut draft.fonts, &draft_theme_fonts),
             keymap_page::PAGE => keymap.ui(ui, pal, actions, &mut draft.keymap, search),
-            plugins_page::PAGE => plugins_ui.ui(ui, pal, search, plugins, &catalog, &mut draft.plugins, &mut plugin_actions),
+            plugins_page::PAGE => plugins_ui.ui(ui, pal, search, plugins, report, &failures, &catalog, &mut draft.plugins, &mut plugin_actions),
             other => app.page_ui(ui, pal, other, search, &mut AppPage { platform: draft, theme: &draft_theme }),
         });
         for action in plugin_actions {
@@ -487,6 +496,60 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         close
     }
 
+    /// Окно установки плагина из файла, как у загрузчика модов: название и версия, что плагин
+    /// приносит, что просит (права) и заработает ли сразу (программа, версия API,
+    /// зависимости). Возвращает (поставить, отмена).
+    fn consent_ui(&self, ui: &mut Ui, pal: &Palette, pending: &forma_plugins::Pending) -> (bool, bool) {
+        let m = &pending.manifest;
+        ui.set_width(modal_width(ui.ctx(), 470.0));
+        modal_title(ui, pal, &t!("plugin-consent-title", name = m.title().to_owned()));
+        let mut meta = vec![t!("plugins-version", version = m.plugin.version.clone())];
+        let authors = m.authors().join(", ");
+        if !authors.is_empty() {
+            meta.push(authors);
+        }
+        ui.label(RichText::new(meta.join(" · ")).size(12.0).color(pal.text_faint));
+        let current = self.plugins.installed().iter().find(|p| p.id() == m.plugin.id && !p.dev);
+        if let Some(old) = current {
+            ui.label(RichText::new(t!("plugin-consent-installed", version = old.manifest.plugin.version.clone())).size(12.0).color(pal.text_faint));
+        }
+        if !m.plugin.description.is_empty() {
+            ui.add_space(6.0);
+            ui.add(egui::Label::new(RichText::new(&m.plugin.description).size(13.0).color(pal.text)).wrap());
+        }
+        let section = |ui: &mut Ui, title: String, items: &[String], color: egui::Color32| {
+            ui.add_space(10.0);
+            ui.label(RichText::new(title).size(12.5).family(forma_ui::fonts::semibold()).color(pal.text_muted));
+            ui.add_space(2.0);
+            for item in items {
+                ui.add(egui::Label::new(RichText::new(format!("•  {item}")).size(13.0).color(color)).wrap());
+            }
+        };
+        section(ui, t!("plugin-consent-brings"), &plugins_page::brings(m), pal.text);
+        let asks = plugins_page::asks(&m.permissions);
+        if asks.is_empty() {
+            section(ui, t!("plugin-consent-asks"), &[t!("plugin-consent-asks-nothing")], pal.text_faint);
+        } else {
+            section(ui, t!("plugin-consent-asks"), &asks, pal.warning);
+        }
+        // Заработает ли: проверка загрузчика так, будто плагин уже стоит.
+        let mut all: Vec<forma_plugins::Installed> = self.plugins.installed().iter().filter(|p| p.id() != m.plugin.id || p.dev).cloned().collect();
+        all.push(forma_plugins::Installed { manifest: m.clone(), dir: std::path::PathBuf::new(), dev: false });
+        let report = forma_plugins::check(&all, self.spec.plugin_app(), |id| self.settings.plugins.enabled(id));
+        let problems: Vec<String> = report.problems(&m.plugin.id).iter().map(plugins_page::problem_text).collect();
+        if !problems.is_empty() {
+            section(ui, t!("plugin-consent-problems"), &problems, pal.danger);
+        }
+        let mut out = (ui.input(|i| i.key_pressed(Key::Enter)), false);
+        ui.add_space(14.0);
+        forma_ui::widgets::button_row(ui, |ui| {
+            let label = if current.is_some() { t!("plugin-consent-replace") } else { t!("plugin-consent-install") };
+            out.0 |= sw::primary_button(ui, pal, &label).clicked();
+            out.1 = ui.add(egui::Button::new(t!("action-cancel")).min_size(vec2(84.0, 30.0))).clicked();
+        });
+        out
+    }
+
     /// Диалоги оболочки.
     pub(crate) fn shell_modals(&mut self, ctx: &egui::Context) {
         // Диалог вынимаем на время отрисовки: внутри него меняются настройки программы.
@@ -498,6 +561,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         let sticky = matches!(modal, Modal::Settings(_) | Modal::Import(_));
         let margin = if matches!(modal, Modal::Settings(_)) { 0 } else { chrome::MODAL_MARGIN };
         let mut rename_done: Option<(usize, String)> = None;
+        let mut install: Option<forma_plugins::Pending> = None;
         let mut theme = self.settings.appearance.theme.clone();
         let (close, outside) = chrome::modal(ctx, &pal, sticky, margin, |ui| match &mut modal {
             Modal::Settings(dialog) => self.settings_ui(ui, &pal, dialog),
@@ -525,6 +589,13 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
                     });
                 });
                 close
+            }
+            Modal::PluginConsent(pending) => {
+                let (ok, cancel) = self.consent_ui(ui, &pal, pending);
+                if ok {
+                    install = Some((**pending).clone());
+                }
+                ok || cancel
             }
             Modal::Rename { index, name } => {
                 ui.set_width(modal_width(ui.ctx(), 380.0));
@@ -563,6 +634,11 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
                 // Быструю смену темы закрыли без выбора — возвращаем прежнюю тему.
                 self.settings.appearance.theme = sw.original().to_owned();
             }
+        }
+        if let Some(pending) = install
+            && let Err(e) = self.plugins.commit(pending)
+        {
+            self.toast(t!("toast-plugin-failed", error = e), true);
         }
         if let Some((index, name)) = rename_done {
             if let Some(ws) = self.layout.workspaces.get_mut(index) {

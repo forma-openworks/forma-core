@@ -1,0 +1,89 @@
+/// API плагинов Forma, версия 1: что программа даёт code плагина (host) и что code плагина
+/// умеет сам (экспорты мира `plugin`). Плагин — компонент WebAssembly (`wasm32-wasip2`),
+/// работает в песочнице и видит только то, что разрешено в `[permissions]` его манифеста.
+///
+/// Тексты сложной формы (контекст, дерево элементов блока) передаются JSON-строками: так их
+/// можно расширять без новой версии API, а SDK `forma-plugin-api` даёт к ним типы.
+package forma:plugin@1.0.0;
+
+/// Общие типы.
+interface types {
+    /// Строка журнала.
+    enum level {
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    /// Строка списка папки.
+    record entry {
+        name: string,
+        dir: bool,
+    }
+
+    /// Просьба о подсказке при наведении: `hover` — id подсказки из манифеста, `text` — текст
+    /// под указателем (абзац или строка), `offset` — символ под указателем (в символах
+    /// Unicode, не в байтах), `note` — путь заметки или файла от корня.
+    record hover-request {
+        hover: string,
+        text: string,
+        offset: u32,
+        note: string,
+    }
+
+    /// Подсказка: к каким символам `text` она относится (`start..end`) и что показать
+    /// (markdown).
+    record hover-result {
+        start: u32,
+        end: u32,
+        markdown: string,
+    }
+}
+
+/// Что программа даёт code плагина. Функции с правами проверяют `[permissions]` манифеста
+/// и без них возвращают ошибку.
+interface host {
+    use types.{level, entry};
+
+    /// Сообщение в журнал программы.
+    log: func(level: level, message: string);
+
+    /// Уведомление внизу окна.
+    notify: func(text: string, error: bool);
+
+    /// Текстовый файл хранилища или проекта: путь от корня, через `/`. Право `vault:read`.
+    read-file: func(path: string) -> result<string, string>;
+
+    /// Что лежит в папке хранилища (`""` — корень). Право `vault:read`.
+    list-dir: func(path: string) -> result<list<entry>, string>;
+
+    /// Записать текстовый файл хранилища. Право `vault:write`.
+    write-file: func(path: string, text: string) -> result<_, string>;
+
+    /// Своё хранилище «ключ — значение» плагина, сохраняется между запусками. Право `data`.
+    data-get: func(key: string) -> option<string>;
+    data-set: func(key: string, value: string) -> result<_, string>;
+}
+
+world plugin {
+    import host;
+    use types.{hover-request, hover-result};
+
+    /// Плагин загружен. `context` — JSON: `{"app": "holotype", "language": "ru",
+    /// "root": true}` (есть ли открытое хранилище или проект).
+    export activate: func(context: string) -> result<_, string>;
+
+    /// В хранилище поменялись файлы (пути от корня; пустой список — поменяться могло что
+    /// угодно) — можно перечитать своё.
+    export changed: func(paths: list<string>);
+
+    /// Подсказка при наведении; ничего — подсказки нет.
+    export hover: func(request: hover-request) -> option<hover-result>;
+
+    /// Блок заметки (` ```lang `) → дерево элементов (JSON), которое рисует программа.
+    export render-block: func(lang: string, source: string, context: string) -> result<string, string>;
+
+    /// Команда из манифеста; `args` и ответ — JSON.
+    export command: func(id: string, args: string) -> result<string, string>;
+}

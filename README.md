@@ -39,7 +39,9 @@ Apps built on Forma Core:
 | `forma-ui` | The theme engine, icons, fonts, widgets, the settings window and its pages, theme tools. Ships the Mycelium Dark and Light themes (`forma_ui::theme::MYCELIUM_THEMES`) |
 | `forma-actions` | Actions and the keymap |
 | `forma-settings` | Settings components, their files, export and import |
-| `forma-plugins` | Plugins: the manifest, installing, removing, turning on and off |
+| `forma-plugins` | Plugins: the `.fpl` format and `forma-plugin.toml` manifest, dependency checks like a mod loader, installing, removing, turning on and off |
+| `forma-plugin-host` | Runs plugin code: WebAssembly components in a wasmtime sandbox, API `forma:plugin@1.0.0` described in WIT |
+| `forma-plugin-api` | The SDK for plugin authors: implement `Plugin`, call `register_plugin!`, build for `wasm32-wasip2` |
 | `forma-i18n` | Localization with Fluent, the `t!` macro, translation completeness checks; the platform's own strings |
 | `forma-build` | Build-script helpers: embedding `.ftl` translations, the Windows icon and version info |
 
@@ -101,7 +103,9 @@ Forma Core — ядро, на котором построены программ
 | `forma-ui` | Движок тем, значки, шрифты, виджеты, окно настроек и его страницы, инструменты для тем. Везёт темы Mycelium Dark и Light (`forma_ui::theme::MYCELIUM_THEMES`) |
 | `forma-actions` | Действия и раскладка клавиш |
 | `forma-settings` | Компоненты настроек, их файлы, экспорт и импорт |
-| `forma-plugins` | Плагины: описание, установка, удаление, включение и выключение |
+| `forma-plugins` | Плагины: формат `.fpl` и манифест `forma-plugin.toml`, проверка зависимостей, как у загрузчика модов, установка, удаление, включение и выключение |
+| `forma-plugin-host` | Запуск code плагинов: компоненты WebAssembly в песочнице wasmtime, API `forma:plugin@1.0.0` на WIT |
+| `forma-plugin-api` | SDK для авторов плагинов: реализовать `Plugin`, вызвать `register_plugin!`, собрать под `wasm32-wasip2` |
 | `forma-i18n` | Локализация на Fluent, макрос `t!`, проверка полноты переводов; строки самой платформы |
 | `forma-build` | Помощники сборочных скриптов: вшивание переводов `.ftl`, значка и сведений о версии для Windows |
 

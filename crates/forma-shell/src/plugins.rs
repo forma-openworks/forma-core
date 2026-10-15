@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use forma_i18n::t;
-use forma_plugins::{CatalogEntry, Kind, PluginSettings, Plugins, Source};
+use forma_plugins::{CatalogEntry, Kind, PluginSettings, Plugins, Report, Source};
 
 pub const VS_DARK: &str = "visual-studio-dark";
 
@@ -33,7 +33,13 @@ pub fn active_dir(plugins: &Plugins, settings: &PluginSettings, id: &str) -> Opt
     plugins.get(id).filter(|_| settings.enabled(id)).map(|p| p.dir.clone())
 }
 
-/// Папки тем из установленных и включённых плагинов.
-pub fn theme_dirs(plugins: &Plugins, settings: &PluginSettings) -> Vec<PathBuf> {
-    plugins.installed().iter().filter(|p| settings.enabled(p.id())).filter_map(|p| p.themes_dir()).collect()
+/// Проверка плагинов программы `app`: что работает и чего не хватает остальным.
+pub fn report(plugins: &Plugins, settings: &PluginSettings, app: &str) -> Report {
+    forma_plugins::check(plugins.installed(), app, |id| settings.enabled(id))
+}
+
+/// Папки тем из работающих плагинов: включённых, подходящих программе и со всеми
+/// зависимостями. У плагина, найденного дважды, не работает ни одна копия.
+pub fn theme_dirs(plugins: &Plugins, report: &Report) -> Vec<PathBuf> {
+    plugins.installed().iter().filter(|p| report.works(p.id())).filter_map(|p| p.themes_dir()).collect()
 }

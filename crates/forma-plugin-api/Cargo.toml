@@ -1,0 +1,11 @@
+[package]
+name = "forma-plugin-api"
+description = "SDK для code плагинов Forma: API плагинов версии 1 для компонентов WebAssembly (wasm32-wasip2)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wit-bindgen = "0.63"
+serde.workspace = true
+serde_json.workspace = true
