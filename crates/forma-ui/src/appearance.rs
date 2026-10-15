@@ -107,93 +107,93 @@ pub fn page(ui: &mut Ui, pal: &Palette, search: &str, a: &mut Appearance, cx: &P
     let mut action = None;
     let d = Appearance::default();
 
-    sw::group(ui, pal, &t!("settings-group-language"));
-    let mut languages: Vec<(Option<String>, String)> = vec![(None, t!("settings-language-system"))];
-    languages.extend(forma_i18n::languages().into_iter().map(|(code, name)| (Some(code), name)));
-    let mut pick = None;
-    if row(ui, pal, search, &t!("settings-language"), a.language != d.language, |ui| {
-        pick = widgets::dropdown(ui, pal, sw::id(PAGE, "language"), 300.0, &a.language, &languages);
-    }) {
-        a.language = d.language.clone();
-    }
-    if let Some(l) = pick {
-        a.language = l;
-    }
+    sw::section(ui, pal, &t!("settings-group-language"), |ui| {
+        let mut languages: Vec<(Option<String>, String)> = vec![(None, t!("settings-language-system"))];
+        languages.extend(forma_i18n::languages().into_iter().map(|(code, name)| (Some(code), name)));
+        let mut pick = None;
+        if row(ui, pal, search, &t!("settings-language"), a.language != d.language, |ui| {
+            pick = widgets::dropdown(ui, pal, sw::id(PAGE, "language"), 300.0, &a.language, &languages);
+        }) {
+            a.language = d.language.clone();
+        }
+        if let Some(l) = pick {
+            a.language = l;
+        }
+    });
 
-    ui.add_space(8.0);
-    sw::group(ui, pal, &t!("settings-group-look"));
-    let current = if a.theme.is_empty() { cx.default_theme.to_owned() } else { a.theme.clone() };
-    let themes: Vec<(String, String, Option<String>)> = cx.themes.iter().map(|t| (t.id.clone(), t.name.clone(), t.builtin.then(|| t!("theme-default")))).collect();
-    let mut pick = None;
-    if row(ui, pal, search, &t!("settings-theme"), !a.theme.is_empty() && a.theme != cx.default_theme, |ui| {
-        pick = widgets::dropdown_tagged(ui, pal, sw::id(PAGE, "theme"), 300.0, &current, &themes);
-    }) {
-        a.theme = String::new();
-    }
-    if let Some(id) = pick {
-        a.theme = id;
-    }
-    for e in cx.theme_errors.iter().take(5) {
-        sw::warning(ui, pal, e);
-    }
-    if cx.themes_dir.is_some() {
-        // Свои темы: шаблон на основе выбранной и папка, где они лежат.
-        let indent = sw::label_indent(ui.available_width());
-        ui.horizontal_wrapped(|ui| {
-            ui.add_space(indent);
-            if crate::icons::text_button(ui, "palette", t!("settings-theme-create")).on_hover_text(t!("settings-theme-create-hint")).clicked() {
-                action = Some(PageAction::CreateTheme);
+    sw::section(ui, pal, &t!("settings-group-look"), |ui| {
+        let current = if a.theme.is_empty() { cx.default_theme.to_owned() } else { a.theme.clone() };
+        let themes: Vec<(String, String, Option<String>)> = cx.themes.iter().map(|t| (t.id.clone(), t.name.clone(), t.builtin.then(|| t!("theme-default")))).collect();
+        let mut pick = None;
+        if row(ui, pal, search, &t!("settings-theme"), !a.theme.is_empty() && a.theme != cx.default_theme, |ui| {
+            pick = widgets::dropdown_tagged(ui, pal, sw::id(PAGE, "theme"), 300.0, &current, &themes);
+        }) {
+            a.theme = String::new();
+        }
+        if let Some(id) = pick {
+            a.theme = id;
+        }
+        for e in cx.theme_errors.iter().take(5) {
+            sw::warning(ui, pal, e);
+        }
+        if cx.themes_dir.is_some() {
+            // Свои темы: шаблон на основе выбранной и папка, где они лежат.
+            let indent = sw::label_indent(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.add_space(indent);
+                if crate::icons::text_button(ui, "palette", t!("settings-theme-create")).on_hover_text(t!("settings-theme-create-hint")).clicked() {
+                    action = Some(PageAction::CreateTheme);
+                }
+                if crate::icons::text_button(ui, "open", t!("settings-theme-open-folder")).clicked() {
+                    action = Some(PageAction::OpenThemesFolder);
+                }
+            });
+            ui.add_space(6.0);
+        }
+        if row(ui, pal, search, &t!("settings-zoom"), a.zoom != d.zoom, |ui| {
+            let mut percent = (a.zoom * 100.0).round();
+            if widgets::number_field(ui, pal, sw::id(PAGE, "zoom"), &mut percent, 50.0..=300.0, 10.0, " %", 150.0).changed() {
+                a.zoom = percent / 100.0;
             }
-            if crate::icons::text_button(ui, "open", t!("settings-theme-open-folder")).clicked() {
-                action = Some(PageAction::OpenThemesFolder);
+        }) {
+            a.zoom = d.zoom;
+        }
+    });
+
+    sw::section(ui, pal, &t!("settings-background"), |ui| {
+        let mut choose = false;
+        if row(ui, pal, search, &t!("settings-background-image"), a.background.is_some(), |ui| {
+            let name = a.background.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| t!("settings-background-from-theme"));
+            ui.label(RichText::new(name).color(pal.text));
+            choose = ui.button(t!("settings-background-choose")).clicked();
+        }) {
+            a.background = None;
+        }
+        if choose {
+            let file = rfd::FileDialog::new().set_title(t!("settings-background-choose")).add_filter("image", &["png", "jpg", "jpeg", "webp", "bmp", "gif"]).pick_file();
+            if file.is_some() {
+                a.background = file;
             }
-        });
-        ui.add_space(4.0);
-    }
-
-    if row(ui, pal, search, &t!("settings-zoom"), a.zoom != d.zoom, |ui| {
-        let mut percent = (a.zoom * 100.0).round();
-        if ui.add(egui::Slider::new(&mut percent, 50.0..=300.0).step_by(10.0).suffix(" %")).changed() {
-            a.zoom = percent / 100.0;
         }
-    }) {
-        a.zoom = d.zoom;
-    }
-
-    ui.add_space(8.0);
-    sw::group(ui, pal, &t!("settings-background"));
-    let mut choose = false;
-    if row(ui, pal, search, &t!("settings-background-image"), a.background.is_some(), |ui| {
-        let name = a.background.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| t!("settings-background-from-theme"));
-        ui.label(RichText::new(name).color(pal.text));
-        choose = ui.button(t!("settings-background-choose")).clicked();
-    }) {
-        a.background = None;
-    }
-    if choose {
-        let file = rfd::FileDialog::new().set_title(t!("settings-background-choose")).add_filter("image", &["png", "jpg", "jpeg", "webp", "bmp", "gif"]).pick_file();
-        if file.is_some() {
-            a.background = file;
+        if row(ui, pal, search, &t!("settings-background-opacity"), a.background_opacity != d.background_opacity, |ui| {
+            let mut percent = (a.background_opacity * 100.0).round();
+            if widgets::number_field(ui, pal, sw::id(PAGE, "opacity"), &mut percent, 0.0..=100.0, 1.0, " %", 150.0).changed() {
+                a.background_opacity = percent / 100.0;
+            }
+        }) {
+            a.background_opacity = d.background_opacity;
         }
-    }
-    if row(ui, pal, search, &t!("settings-background-opacity"), a.background_opacity != d.background_opacity, |ui| {
-        let mut percent = (a.background_opacity * 100.0).round();
-        if ui.add(egui::Slider::new(&mut percent, 0.0..=100.0).step_by(1.0).suffix(" %")).changed() {
-            a.background_opacity = percent / 100.0;
+        let fits: Vec<(Fit, String)> = Fit::ALL.iter().map(|f| (*f, fit_label(*f))).collect();
+        let mut pick = None;
+        if row(ui, pal, search, &t!("settings-background-fit"), a.background_fit != d.background_fit, |ui| {
+            pick = widgets::dropdown(ui, pal, sw::id(PAGE, "fit"), 220.0, &a.background_fit, &fits);
+        }) {
+            a.background_fit = d.background_fit;
         }
-    }) {
-        a.background_opacity = d.background_opacity;
-    }
-    let fits: Vec<(Fit, String)> = Fit::ALL.iter().map(|f| (*f, fit_label(*f))).collect();
-    let mut pick = None;
-    if row(ui, pal, search, &t!("settings-background-fit"), a.background_fit != d.background_fit, |ui| {
-        pick = widgets::dropdown(ui, pal, sw::id(PAGE, "fit"), 220.0, &a.background_fit, &fits);
-    }) {
-        a.background_fit = d.background_fit;
-    }
-    if let Some(f) = pick {
-        a.background_fit = f;
-    }
+        if let Some(f) = pick {
+            a.background_fit = f;
+        }
+    });
     action
 }
 

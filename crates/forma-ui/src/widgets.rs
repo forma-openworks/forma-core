@@ -347,6 +347,217 @@ pub fn segmented(ui: &mut Ui, pal: &Palette, id: Id, labels: &[&str], selected: 
     clicked
 }
 
+/// Число для подписи: без лишних нулей в конце (`14`, `14.5`, `1.45`).
+pub fn trim_number(value: f32, decimals: usize) -> String {
+    let s = format!("{value:.decimals$}");
+    if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_owned() } else { s }
+}
+
+/// Сколько знаков после точки нужно, чтобы показать шаг `step` (`0.5` → 1, `0.05` → 2).
+fn step_decimals(step: f32) -> usize {
+    (0..4).find(|&d| ((step * 10f32.powi(d as i32)).round() - step * 10f32.powi(d as i32)).abs() < 1e-3).unwrap_or(3)
+}
+
+/// Значение в пределах и на сетке шага (от начала пределов).
+fn snap(value: f32, range: &std::ops::RangeInclusive<f32>, step: f32) -> f32 {
+    let (lo, hi) = (*range.start(), *range.end());
+    let v = if step > 0.0 { lo + ((value - lo) / step).round() * step } else { value };
+    // Округление убирает хвосты вроде 1.4500001 после сложения шагов.
+    let d = step_decimals(step) as i32 + 1;
+    let p = 10f32.powi(d);
+    ((v * p).round() / p).clamp(lo, hi)
+}
+
+/// Что поле числа помнит между кадрами.
+#[derive(Clone, Debug, Default)]
+struct NumberMemory {
+    /// Протяжка: значение в начале и пройденное мышью расстояние.
+    drag: Option<(f32, f32)>,
+    /// Ввод с клавиатуры: набранный текст и нужно ли отдать полю фокус.
+    edit: Option<(String, bool)>,
+}
+
+/// Ширина стрелки шага у края поля числа.
+const NUMBER_ARROW_W: f32 = 22.0;
+
+/// Поле числа вместо ползунка, как поля чисел в Blender: значение с единицей посередине,
+/// по краям стрелки шага, а мягкая заливка показывает, где значение в пределах `range`.
+/// Протяжка влево-вправо меняет значение (с Shift — медленнее), щелчок — ввод числа с
+/// клавиатуры (Enter — принять, Escape — отменить), стрелки клавиатуры — шаг.
+#[allow(clippy::too_many_arguments)]
+pub fn number_field(ui: &mut Ui, pal: &Palette, id: Id, value: &mut f32, range: std::ops::RangeInclusive<f32>, step: f32, suffix: &str, width: f32) -> egui::Response {
+    let (lo, hi) = (*range.start(), *range.end());
+    let decimals = step_decimals(step);
+    let width = width.min(ui.available_width()).max(90.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
+    let mut resp = ui.interact(rect, id, Sense::click_and_drag());
+    let enabled = ui.is_enabled();
+    let mut mem: NumberMemory = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+    let before = *value;
+    let left = Rect::from_min_size(rect.min, vec2(NUMBER_ARROW_W, rect.height()));
+    let right = Rect::from_min_max(pos2(rect.right() - NUMBER_ARROW_W, rect.top()), rect.max);
+    let pointer = resp.interact_pointer_pos().or(resp.hover_pos());
+    let on_left = pointer.is_some_and(|p| left.contains(p));
+    let on_right = pointer.is_some_and(|p| right.contains(p));
+
+    if enabled && mem.edit.is_none() {
+        // Протяжка — только из середины: со стрелок тянуть нечего.
+        if resp.drag_started() && !on_left && !on_right {
+            mem.drag = Some((*value, 0.0));
+        }
+        if let Some((start, dx)) = &mut mem.drag {
+            if resp.dragged() {
+                let slow = if ui.input(|i| i.modifiers.shift) { 0.2 } else { 1.0 };
+                *dx += resp.drag_delta().x * slow;
+                // Весь диапазон — примерно за полторы ширины поля.
+                let per_px = (hi - lo) / (rect.width() * 1.5);
+                *value = snap(*start + *dx * per_px, &range, step);
+            }
+            if resp.drag_stopped() || !resp.dragged() {
+                mem.drag = None;
+            }
+        } else if resp.clicked() {
+            if on_left {
+                *value = snap(*value - step, &range, step);
+            } else if on_right {
+                *value = snap(*value + step, &range, step);
+            } else {
+                mem.edit = Some((trim_number(*value, decimals), true));
+            }
+        }
+        if resp.has_focus() {
+            let (down, up) = ui.input_mut(|i| {
+                let down = i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft) || i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
+                let up = i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight) || i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
+                (down, up)
+            });
+            if down {
+                *value = snap(*value - step, &range, step);
+            }
+            if up {
+                *value = snap(*value + step, &range, step);
+            }
+        }
+    }
+
+    let painter = ui.painter_at(rect.expand(3.0));
+    let editing = mem.edit.is_some();
+    let active = editing || mem.drag.is_some();
+    let hovered = enabled && resp.hovered();
+    let dim = |c: Color32| if enabled { c } else { c.gamma_multiply(0.45) };
+    let fill = if hovered && !editing { pal.control_hover } else { pal.input_bg };
+    let stroke = if active || resp.has_focus() { pal.input_focus } else { pal.border };
+    painter.rect(rect, CornerRadius::same(7), fill, Stroke::new(1.0, dim(stroke)), egui::StrokeKind::Inside);
+    if !editing {
+        // Заливка до места значения в пределах: та же скруглённая плашка, обрезанная справа.
+        let t = if hi > lo { ((*value - lo) / (hi - lo)).clamp(0.0, 1.0) } else { 0.0 };
+        let filled = Rect::from_min_max(rect.min, pos2(rect.left() + rect.width() * t, rect.bottom()));
+        ui.painter().with_clip_rect(filled.intersect(ui.clip_rect())).rect_filled(rect.shrink(1.0), CornerRadius::same(6), dim(pal.accent_soft.gamma_multiply(0.8)));
+        // Стрелки шага — только под указателем (как в Blender), у предела — бледнее.
+        let arrows = enabled && (hovered || resp.has_focus()) && mem.drag.is_none();
+        for (zone, sign, hot) in [(left, -1.0f32, on_left), (right, 1.0, on_right)] {
+            if !arrows {
+                break;
+            }
+            let can = if sign < 0.0 { *value > lo } else { *value < hi };
+            if hot && hovered && can {
+                painter.rect_filled(zone.shrink(3.0), CornerRadius::same(5), pal.bg_hover);
+            }
+            let color = if !can { pal.text_faint.gamma_multiply(0.4) } else if hot && hovered { pal.text } else { pal.text_faint };
+            let c = zone.center();
+            let (w, h) = (2.6, 4.2);
+            let tip = pos2(c.x + sign * w, c.y);
+            let pts = vec![pos2(c.x - sign * w, c.y - h), tip, pos2(c.x - sign * w, c.y + h)];
+            painter.add(egui::Shape::line(pts, Stroke::new(1.5, dim(color))));
+        }
+        let text = format!("{}{}", trim_number(*value, decimals), suffix);
+        let color = if active { pal.heading } else { pal.text };
+        let galley = painter.layout_no_wrap(text, FontId::proportional(13.5), dim(color));
+        painter.galley(rect.center() - galley.size() / 2.0, galley, dim(color));
+        if enabled {
+            if on_left || on_right {
+                resp = resp.on_hover_cursor(CursorIcon::PointingHand);
+            } else {
+                resp = resp.on_hover_cursor(CursorIcon::ResizeHorizontal);
+            }
+        }
+    }
+
+    // Ввод числа с клавиатуры прямо в поле.
+    if let Some((text, focus)) = &mut mem.edit {
+        let edit_id = id.with("edit");
+        let inner = rect.shrink2(vec2(10.0, 0.0));
+        let mut child = ui.new_child(UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)));
+        let edit = egui::TextEdit::singleline(text).id(edit_id).font(FontId::proportional(13.5)).frame(egui::Frame::NONE).horizontal_align(Align::Center).desired_width(inner.width());
+        let out = edit.show(&mut child);
+        if std::mem::take(focus) {
+            out.response.request_focus();
+            let mut state = out.state.clone();
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(text.chars().count()))));
+            state.store(ui.ctx(), edit_id);
+        } else if out.response.lost_focus() {
+            let cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            if !cancel && let Ok(v) = text.trim().trim_end_matches(suffix.trim()).trim().replace(',', ".").parse::<f32>() {
+                *value = snap(v, &range, step);
+            }
+            mem.edit = None;
+        }
+    }
+    if *value != before {
+        resp.mark_changed();
+    }
+    ui.data_mut(|d| d.insert_temp(id, mem));
+    resp
+}
+
+/// Цвет текстом: `#rrggbb` (или `#rrggbbaa`, если он прозрачный).
+pub fn color_hex(c: Color32) -> String {
+    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    if a == 255 { format!("#{r:02x}{g:02x}{b:02x}") } else { format!("#{r:02x}{g:02x}{b:02x}{a:02x}") }
+}
+
+/// Поле цвета: образец и код `#rrggbb`; щелчок открывает палитру и поле для кода цвета.
+pub fn color_field(ui: &mut Ui, pal: &Palette, id: Id, color: &mut Color32, width: f32) -> egui::Response {
+    let width = width.min(ui.available_width()).max(90.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 28.0), Sense::hover());
+    let mut resp = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+    let popup_id = id.with("popup");
+    let open = egui::Popup::is_id_open(ui.ctx(), popup_id);
+    let enabled = ui.is_enabled();
+    let dim = |c: Color32| if enabled { c } else { c.gamma_multiply(0.45) };
+    let painter = ui.painter();
+    let fill = if (resp.hovered() && enabled) || open { pal.control_hover } else { pal.input_bg };
+    painter.rect(rect, CornerRadius::same(7), fill, Stroke::new(1.0, dim(if open { pal.input_focus } else { pal.border })), egui::StrokeKind::Inside);
+    let swatch = Rect::from_center_size(pos2(rect.left() + 16.0, rect.center().y), vec2(18.0, 18.0));
+    painter.rect(swatch, CornerRadius::same(5), dim(*color), Stroke::new(1.0, pal.border_strong), egui::StrokeKind::Inside);
+    let hex = painter.layout_no_wrap(color_hex(*color), FontId::monospace(12.5), dim(pal.text));
+    painter.galley(pos2(swatch.right() + 9.0, rect.center().y - hex.size().y / 2.0), hex, dim(pal.text));
+    let before = *color;
+    egui::Popup::menu(&resp).id(popup_id).style(theme::menu_style).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        ui.spacing_mut().slider_width = 220.0;
+        egui::color_picker::color_picker_color32(ui, color, egui::color_picker::Alpha::Opaque);
+        ui.add_space(6.0);
+        // Код цвета можно вставить или набрать: `#ff7b70`.
+        let key = popup_id.with("hex");
+        let mut text: String = ui.data(|d| d.get_temp(key)).unwrap_or_else(|| color_hex(*color));
+        let r = ui.add(egui::TextEdit::singleline(&mut text).font(FontId::monospace(13.0)).desired_width(f32::INFINITY));
+        if r.changed()
+            && let Ok(c) = Color32::from_hex(text.trim())
+        {
+            *color = c;
+        }
+        if r.has_focus() {
+            ui.data_mut(|d| d.insert_temp(key, text));
+        } else {
+            ui.data_mut(|d| d.remove::<String>(key));
+        }
+    });
+    if *color != before {
+        resp.mark_changed();
+    }
+    resp
+}
+
 /// Выпадающий список: поле с текущим значением, по щелчку — список вариантов с отметкой
 /// у выбранного. Для выборов, которые со временем растут: язык, тема, шрифт.
 /// Возвращает выбранный вариант, если он сменился.

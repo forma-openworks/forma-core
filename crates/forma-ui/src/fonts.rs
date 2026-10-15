@@ -145,14 +145,32 @@ fn database() -> &'static fontdb::Database {
 }
 
 pub fn warm_up() {
-    std::thread::spawn(|| {
-        database();
-    });
+    // Один фоновый поток на всю программу, сколько бы раз ни просили.
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    if !STARTED.swap(true, Ordering::Relaxed) {
+        std::thread::spawn(|| {
+            database();
+        });
+    }
 }
 
 /// Загружены ли уже шрифты системы (чтобы не ждать их в кадре интерфейса).
 pub fn database_ready() -> bool {
     DB.get().is_some()
+}
+
+/// Списки семейств: все и моноширинные.
+pub type FamilyLists = (Arc<Vec<String>>, Arc<Vec<String>>);
+
+/// Семейства шрифтов системы (все и моноширинные), если база шрифтов уже загружена;
+/// иначе `None`, а база начинает грузиться в фоне. Списки строятся один раз.
+pub fn family_lists() -> Option<FamilyLists> {
+    static LISTS: OnceLock<FamilyLists> = OnceLock::new();
+    if !database_ready() {
+        warm_up();
+        return None;
+    }
+    Some(LISTS.get_or_init(|| (Arc::new(families(false)), Arc::new(families(true)))).clone())
 }
 
 /// Семейства шрифтов системы по алфавиту. `monospace` — только моноширинные.

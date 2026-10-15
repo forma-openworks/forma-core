@@ -18,13 +18,13 @@ use forma_ui::font_page::{self, FontPage};
 use forma_ui::fonts::Fonts;
 use forma_ui::keymap_page::{self, KeymapPage};
 use forma_ui::plugins_page::{self, PluginsPage};
-use forma_ui::settings_window::{self as sw, Footer, PageInfo, SettingsWindow};
+use forma_ui::settings_window::{self as sw, Footer, PageInfo, SettingsWindow, order};
 use forma_ui::theme::{Origin, Palette};
 use forma_ui::theme_tools;
 
 use crate::actions;
 use crate::chrome::{self, modal_max_height, modal_title, modal_width};
-use crate::settings::{AppSettings, PlatformSettings};
+use crate::settings::{AppPage, AppSettings, PlatformSettings};
 use crate::shell::{Modal, Shell, ShellCmd, open_folder, reveal_in_explorer};
 use crate::workspace::Builtin;
 
@@ -100,7 +100,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
             draft: self.settings.clone(),
             app: self.app_settings.clone(),
             keymap: KeymapPage::default(),
-            fonts: FontPage::default(),
+            fonts: FontPage,
             plugins: PluginsPage::default(),
         })));
     }
@@ -115,13 +115,12 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
     }
 
     fn settings_pages(&self) -> Vec<PageInfo> {
-        let platform = t!("settings-section-platform");
         let mut pages = vec![
-            PageInfo { id: appearance::PAGE.into(), section: platform.clone(), title: t!("settings-page-appearance"), keywords: appearance::keywords() },
-            PageInfo { id: theme_tools::INSPECTOR_PAGE.into(), section: platform.clone(), title: t!("settings-page-theme-tokens"), keywords: theme_tools::keywords(&self.theme_kit()) },
-            PageInfo { id: font_page::PAGE.into(), section: platform.clone(), title: t!("settings-page-fonts"), keywords: font_page::keywords() },
-            PageInfo { id: keymap_page::PAGE.into(), section: platform.clone(), title: t!("settings-page-keymap"), keywords: keymap_page::keywords(&self.actions) },
-            PageInfo { id: plugins_page::PAGE.into(), section: platform, title: t!("settings-page-plugins"), keywords: plugins_page::keywords() },
+            PageInfo::new(appearance::PAGE, t!("settings-page-appearance")).icon("palette").order(order::APPEARANCE).keywords(appearance::keywords()),
+            PageInfo::new(font_page::PAGE, t!("settings-page-fonts")).under(appearance::PAGE).order(10).keywords(font_page::keywords()),
+            PageInfo::new(theme_tools::INSPECTOR_PAGE, t!("settings-page-theme-tokens")).under(appearance::PAGE).order(20).keywords(theme_tools::keywords(&self.theme_kit())),
+            PageInfo::new(keymap_page::PAGE, t!("settings-page-keymap")).icon("keyboard").order(order::KEYMAP).keywords(keymap_page::keywords(&self.actions)),
+            PageInfo::new(plugins_page::PAGE, t!("settings-page-plugins")).icon("plugin").order(order::PLUGINS).keywords(plugins_page::keywords()),
         ];
         pages.extend(self.app_settings.pages());
         pages
@@ -162,7 +161,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
             font_page::PAGE => d.draft.fonts != live.fonts,
             keymap_page::PAGE => d.draft.keymap != live.keymap,
             plugins_page::PAGE => d.draft.plugins.disabled != live.plugins.disabled,
-            other => d.app.page_modified(live_app, other),
+            other => d.app.page_modified(live_app, other, &d.draft, live),
         };
         // Флаги страниц считаются до отрисовки: черновик меняется внутри страниц.
         let flags: Vec<(String, bool)> = pages.iter().map(|p| (p.id.clone(), modified(&p.id))).collect();
@@ -190,7 +189,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
             font_page::PAGE => fonts.ui(ui, pal, search, &mut draft.fonts, &draft_theme_fonts),
             keymap_page::PAGE => keymap.ui(ui, pal, actions, &mut draft.keymap, search),
             plugins_page::PAGE => plugins_ui.ui(ui, pal, search, plugins, &catalog, &mut draft.plugins, &mut plugin_actions),
-            other => app.page_ui(ui, pal, other, search),
+            other => app.page_ui(ui, pal, other, search, &mut AppPage { platform: draft, theme: &draft_theme }),
         });
         for action in plugin_actions {
             self.cmds.push(plugin_cmd(action));

@@ -24,7 +24,7 @@ pub mod settings;
 mod shell;
 pub mod workspace;
 
-pub use settings::{AppSettings, PlatformSettings};
+pub use settings::{AppPage, AppSettings, PlatformSettings};
 pub use shell::{Shell, ShellCmd, Spec, Toast, font_choice, open_folder, reveal_in_explorer};
 pub use workspace::{Builtin, Ids, Layout, ShellEditor, Workspace};
 

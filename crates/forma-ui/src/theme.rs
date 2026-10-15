@@ -253,6 +253,10 @@ theme_tokens! {
         modal_border = "modal.border" => "$border",
         /// Затемнение под диалогом.
         modal_backdrop = "modal.backdrop" => "#0000006e",
+        /// Карточка группы настроек в окне настроек.
+        settings_card = "settings.card" => "mix($modal.bg, $bg.hover, 40%)",
+        /// Тонкие линии между строками в карточке настроек.
+        settings_divider = "settings.divider" => "alpha($border, 80%)",
         /// Уведомления внизу окна.
         toast_bg = "toast.bg" => "$bg.elevated",
         /// Текст уведомлений.

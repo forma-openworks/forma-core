@@ -12,7 +12,7 @@ use forma_settings::export::{Archive, Status};
 use forma_ui::appearance::Appearance;
 use forma_ui::fonts::Fonts;
 use forma_ui::settings_window::PageInfo;
-use forma_ui::theme::Palette;
+use forma_ui::theme::{Palette, Theme};
 use serde::{Deserialize, Serialize};
 
 /// Настройки платформы: одинаковы у всех программ Forma и переносятся между ними экспортом.
@@ -38,6 +38,15 @@ impl PlatformSettings {
     }
 }
 
+/// Что ещё видно странице программы в окне настроек, кроме её собственных настроек.
+pub struct AppPage<'a> {
+    /// Черновик настроек платформы: страница программы может показать и их — например,
+    /// шрифт консоли на странице «Запуск и терминал».
+    pub platform: &'a mut PlatformSettings,
+    /// Тема, выбранная в черновике: её цвета и шрифты.
+    pub theme: &'a Theme,
+}
+
 /// Свои настройки программы: компоненты, страницы в окне настроек, экспорт и импорт.
 ///
 /// Окно настроек работает с черновиком: страницы программы меняют копию, а к программе
@@ -53,12 +62,15 @@ pub trait AppSettings: Clone + PartialEq + 'static {
     fn pages(&self) -> Vec<PageInfo> {
         Vec::new()
     }
-    /// Есть ли на странице `page` изменения относительно настроек `live`.
-    fn page_modified(&self, _live: &Self, _page: &str) -> bool {
+    /// Есть ли на странице `page` изменения относительно настроек `live`. `platform` и
+    /// `live_platform` — черновик и действующие настройки платформы (если страница
+    /// программы показывает и их).
+    fn page_modified(&self, _live: &Self, _page: &str, _platform: &PlatformSettings, _live_platform: &PlatformSettings) -> bool {
         false
     }
-    /// Рисует страницу программы `page`, меняя черновик `self`.
-    fn page_ui(&mut self, _ui: &mut Ui, _pal: &Palette, _page: &str, _search: &str) {}
+    /// Рисует страницу программы `page`, меняя черновик `self` (и, если нужно, черновик
+    /// настроек платформы из `cx`).
+    fn page_ui(&mut self, _ui: &mut Ui, _pal: &Palette, _page: &str, _search: &str, _cx: &mut AppPage) {}
 
     /// Компоненты программы, которые переносятся экспортом: id, название, что внутри.
     fn exportable(&self) -> Vec<(&'static str, String, String)> {
