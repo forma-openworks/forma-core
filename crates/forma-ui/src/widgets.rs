@@ -157,11 +157,20 @@ pub fn centered_text(ui: &mut Ui, text: &str, size: f32, color: Color32, max_wid
 /// Открытая вкладка отмечена полоской по нижнему краю заголовка — отдельно от названия,
 /// а не подчёркиванием под ним. Возвращает ответ и наведён ли курсор на крестик.
 pub fn doc_tab(ui: &mut Ui, pal: &Palette, icon: &str, title: &str, active: bool, dirty: bool) -> (egui::Response, bool) {
+    doc_tab_hinted(ui, pal, icon, title, None, active, dirty)
+}
+
+/// Как [`doc_tab`], но после названия — подпись мельче и своим цветом: папка у файлов с
+/// одинаковыми именами (`main.rs  src/bin`), пометка «удалён».
+#[allow(clippy::too_many_arguments)]
+pub fn doc_tab_hinted(ui: &mut Ui, pal: &Palette, icon: &str, title: &str, hint: Option<(&str, Color32)>, active: bool, dirty: bool) -> (egui::Response, bool) {
     let text_color = if active { pal.tab_active_text } else { pal.tab_text };
     let galley = ui.painter().layout_no_wrap(title.to_owned(), FontId::proportional(13.0), text_color);
-    let width = 8.0 + 14.0 + 6.0 + galley.size().x + 6.0 + 16.0 + 6.0;
+    let hint = hint.map(|(text, color)| ui.painter().layout_no_wrap(text.to_owned(), FontId::proportional(11.5), color));
+    let hint_w = hint.as_ref().map_or(0.0, |g| g.size().x + 6.0);
+    let width = 8.0 + 14.0 + 6.0 + galley.size().x + hint_w + 6.0 + 16.0 + 6.0;
     let height = ui.available_height().clamp(22.0, 30.0);
-    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click_and_drag());
     let painter = ui.painter_at(rect);
     let hovered = resp.hovered();
     let t = ui.ctx().animate_bool_with_time(resp.id.with("active"), active, 0.15);
@@ -177,7 +186,12 @@ pub fn doc_tab(ui: &mut Ui, pal: &Palette, icon: &str, title: &str, active: bool
     let cy = rect.center().y;
     let icon_rect = Rect::from_center_size(pos2(rect.left() + 15.0, cy), vec2(14.0, 14.0));
     crate::icons::paint(&painter, icon_rect, icon, pal.text_muted);
+    let title_right = icon_rect.right() + 6.0 + galley.size().x;
     painter.galley(pos2(icon_rect.right() + 6.0, cy - galley.size().y / 2.0), galley, text_color);
+    if let Some(g) = hint {
+        let color = g.job.sections.first().map_or(pal.text_faint, |s| s.format.color);
+        painter.galley(pos2(title_right + 6.0, cy - g.size().y / 2.0 + 0.5), g, color);
+    }
 
     let close = Rect::from_center_size(pos2(rect.right() - 14.0, cy), vec2(16.0, 16.0));
     let on_close = resp.hover_pos().is_some_and(|p| close.contains(p));

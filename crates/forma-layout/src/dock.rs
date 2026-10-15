@@ -122,6 +122,33 @@ pub trait EditorViewer {
     /// Начало кадра отдельного окна ОС: у него свой ввод, и общие сочетания клавиш
     /// программа ловит здесь (в главном окне она делает это сама).
     fn window_input(&mut self, _ui: &mut Ui) {}
+
+    /// Программа начала тащить часть редактора `editor` наружу (например, вкладку файла из
+    /// строки вкладок): подпись у курсора. Дальше перенос ведёт раскладка, как перенос
+    /// области: подсвечивает, куда встанет новый редактор, а мимо окон программы — новое окно.
+    fn carry_started(&mut self, _editor: &mut Self::Editor) -> Option<String> {
+        None
+    }
+
+    /// Перенос части редактора закончился над краем области, над пустым окном или мимо окон:
+    /// программа вынимает её из `source` и отдаёт новым редактором. `None` — нечего.
+    fn carry_take(&mut self, _source: &mut Self::Editor) -> Option<Self::Editor> {
+        None
+    }
+
+    /// Вынутое отпустили над серединой области: программа добавляет `part` в редактор
+    /// `target` (вкладка — к его вкладкам). `Err` — сюда нельзя, и часть вернётся обратно.
+    fn carry_merge(&mut self, _target: &mut Self::Editor, part: Self::Editor) -> Result<(), Self::Editor> {
+        Err(part)
+    }
+
+    /// Перенос части редактора отменили (Escape или отпустили там, где ничего не будет).
+    fn carry_cancel(&mut self) {}
+
+    /// Редактор опустел (из него вынули последнюю вкладку): его область закрывается.
+    fn is_empty(&mut self, _editor: &Self::Editor) -> bool {
+        false
+    }
 }
 
 /// Цвета и оформление, которые задаёт приложение.
@@ -236,6 +263,10 @@ struct Drag {
     released: bool,
     /// Размер исходной области — такого размера будет новое окно.
     size: Vec2,
+    /// Тащат не всю область, а часть её редактора (вкладку) — см. [`EditorViewer::carry_started`].
+    carry: bool,
+    /// Отменили Escape.
+    cancelled: bool,
 }
 
 struct CornerDrag {
@@ -300,6 +331,9 @@ impl AreaRects {
 enum Op<T> {
     /// Перенести область в другое место (`Center` — на место другой области).
     Move { from: (SurfaceKey, AreaId), to: Target },
+    /// Перенести часть редактора области (вкладку): к краю области — новой областью, в
+    /// середину — в её редактор, мимо окон — новым окном.
+    Carry { from: (SurfaceKey, AreaId), to: Target, size: Vec2 },
     /// Разделить область, положив в новую часть копию редактора.
     Split { key: SurfaceKey, area: AreaId, zone: Zone, ratio: f32 },
     Join { key: SurfaceKey, keep: AreaId, remove: AreaId },
@@ -495,8 +529,8 @@ impl<T> DockState<T> {
         let rects = std::mem::take(&mut self.rt.rects);
         if let Some(drag) = &self.rt.drag {
             // Окно-источник пропало (например, закрылось) — перенос отменяется.
-            if !rects.iter().any(|s| s.key == drag.src) {
-                self.rt.drag = None;
+            if !rects.iter().any(|s| s.key == drag.src) && self.rt.drag.take().is_some_and(|d| d.carry) {
+                viewer.carry_cancel();
             }
         }
         if let Some(g) = &self.rt.corner
@@ -510,22 +544,28 @@ impl<T> DockState<T> {
             self.rt.pick = None;
         }
         self.rt.target = Target::Nothing;
+        if self.rt.drag.as_ref().is_some_and(|d| d.cancelled) && self.rt.drag.take().is_some_and(|d| d.carry) {
+            viewer.carry_cancel();
+        }
         if let Some(drag) = &self.rt.drag {
             let target = drag.pointer.map_or(Target::Nothing, |p| compute_target(&rects, p));
             let target = match target {
-                Target::Area { key, area, .. } if key == drag.src && area == drag.area => Target::Nothing,
+                // Часть редактора можно положить и рядом с её же областью, но не в неё саму.
+                Target::Area { key, area, zone } if key == drag.src && area == drag.area && (!drag.carry || zone == Zone::Center) => Target::Nothing,
                 t => t,
             };
             if drag.released {
                 let drag = self.rt.drag.take().expect("проверено выше");
                 match target {
+                    Target::Nothing if drag.carry => viewer.carry_cancel(),
+                    Target::Nothing => {}
+                    to if drag.carry => self.rt.ops.push(Op::Carry { from: (drag.src, drag.area), to, size: drag.size }),
                     Target::NewWindow(p) => self.rt.ops.push(Op::Detach {
                         key: drag.src,
                         area: drag.area,
                         pos: Some(p - vec2(24.0, 14.0)),
                         size: drag.size,
                     }),
-                    Target::Nothing => {}
                     to => self.rt.ops.push(Op::Move { from: (drag.src, drag.area), to }),
                 }
             } else {
@@ -583,6 +623,7 @@ impl<T> DockState<T> {
                     Target::Nothing => {}
                 }
             }
+            Op::Carry { from: (key, area), to, size } => self.carry(main, key, area, to, size, viewer),
             Op::Split { key, area, zone, ratio } => {
                 let id = self.new_area_id();
                 let Some(s) = surface_mut(main, &mut self.windows, key) else { return };
@@ -643,6 +684,68 @@ impl<T> DockState<T> {
                     s.maximized = if s.maximized == Some(area) { None } else { Some(area) };
                 }
             }
+        }
+    }
+
+    /// Переносит часть редактора области `area` (вкладку) туда, где её отпустили. Опустевшая
+    /// область закрывается.
+    fn carry(&mut self, main: &mut Surface<T>, key: SurfaceKey, area: AreaId, to: Target, size: Vec2, viewer: &mut impl EditorViewer<Editor = T>) {
+        let Some(source) = surface_mut(main, &mut self.windows, key).and_then(|s| s.area_mut(area)) else {
+            viewer.carry_cancel();
+            return;
+        };
+        let Some(part) = viewer.carry_take(&mut source.editor) else { return };
+        // Не получилось положить — часть возвращается туда, откуда её взяли.
+        let mut back: Option<T> = None;
+        match to {
+            Target::Area { key: tk, area: ta, zone: Zone::Center } => match surface_mut(main, &mut self.windows, tk).and_then(|s| s.area_mut(ta)) {
+                Some(target) => {
+                    if let Err(part) = viewer.carry_merge(&mut target.editor, part) {
+                        back = Some(part);
+                    } else {
+                        self.rt.focused.insert(tk, ta);
+                    }
+                }
+                None => back = Some(part),
+            },
+            Target::Area { key: tk, area: ta, zone } => {
+                let id = self.new_area_id();
+                match surface_mut(main, &mut self.windows, tk) {
+                    Some(s) => {
+                        s.maximized = None;
+                        match s.split_area(ta, zone, Area::new(id, part), 0.5) {
+                            Ok(()) => {
+                                self.rt.focused.insert(tk, id);
+                            }
+                            Err(a) => back = Some(a.editor),
+                        }
+                    }
+                    None => back = Some(part),
+                }
+            }
+            Target::Empty(tk) => {
+                let id = self.new_area_id();
+                match surface_mut(main, &mut self.windows, tk) {
+                    Some(s) => {
+                        s.root = Some(Node::area(id, part));
+                        self.rt.focused.insert(tk, id);
+                    }
+                    None => back = Some(part),
+                }
+            }
+            Target::NewWindow(p) => self.spawn_window(part, Some(p - vec2(24.0, 14.0)), size),
+            Target::Nothing => back = Some(part),
+        }
+        if let Some(part) = back
+            && let Some(source) = surface_mut(main, &mut self.windows, key).and_then(|s| s.area_mut(area))
+            && let Err(part) = viewer.carry_merge(&mut source.editor, part)
+        {
+            viewer.on_close(part);
+        }
+        // Из области вынули последнее — она закрывается.
+        let empty = surface_ref(main, &self.windows, key).and_then(|s| s.area(area)).is_some_and(|a| viewer.is_empty(&a.editor));
+        if empty && let Some(a) = surface_mut(main, &mut self.windows, key).and_then(|s| s.remove_area(area)) {
+            viewer.on_close(a.editor);
         }
     }
 
@@ -994,7 +1097,7 @@ impl<T> DockState<T> {
             (i.pointer.latest_pos().or(i.pointer.interact_pos()), i.pointer.primary_down(), i.consume_key(Modifiers::NONE, Key::Escape))
         });
         if cancel {
-            self.rt.drag = None;
+            drag.cancelled = true;
             return;
         }
         if let (Some(p), Some(off)) = (local, offset) {
@@ -1130,7 +1233,7 @@ impl<T> DockState<T> {
         // перетаскивание — перенести область в другое место или окно.
         let head = ui.interact(header, Id::new(("forma-dock-header", area.id)), Sense::click_and_drag());
         if head.drag_started() && self.idle() {
-            self.rt.drag = Some(Drag { src: key, area: area.id, title: viewer.title(&area.editor), pointer: None, released: false, size: rect.size() });
+            self.rt.drag = Some(Drag { src: key, area: area.id, title: viewer.title(&area.editor), pointer: None, released: false, size: rect.size(), carry: false, cancelled: false });
         }
         if head.double_clicked() {
             self.rt.ops.push(Op::ToggleMaximize { key, area: area.id });
@@ -1188,6 +1291,12 @@ impl<T> DockState<T> {
             // Подписи не выделяются мышью: иначе за них не потянуть заголовок.
             child.style_mut().interaction.selectable_labels = false;
             viewer.header(&mut child, &mut area.editor);
+            // Программа вынесла часть редактора из заголовка (вкладку) — дальше перенос ведёт раскладка.
+            if self.idle()
+                && let Some(title) = viewer.carry_started(&mut area.editor)
+            {
+                self.rt.drag = Some(Drag { src: key, area: area.id, title, pointer: None, released: false, size: rect.size(), carry: true, cancelled: false });
+            }
         }
 
         // Содержимое редактора.
