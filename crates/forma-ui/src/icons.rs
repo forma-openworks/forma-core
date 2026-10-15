@@ -163,9 +163,12 @@ pub fn color_of(name: &str, fallback: Color32) -> Color32 {
     overrides().read().ok().and_then(|s| s.colors.get(name).copied()).unwrap_or(fallback)
 }
 
+/// Значок, вшитый в программу: имя по смыслу и SVG.
+type Embedded = (&'static str, &'static [u8]);
+
 /// Значки программы: имя по смыслу и SVG, вшитый в программу.
-fn app_icons() -> &'static RwLock<Vec<(&'static str, &'static [u8])>> {
-    static APP: OnceLock<RwLock<Vec<(&'static str, &'static [u8])>>> = OnceLock::new();
+fn app_icons() -> &'static RwLock<Vec<Embedded>> {
+    static APP: OnceLock<RwLock<Vec<Embedded>>> = OnceLock::new();
     APP.get_or_init(RwLock::default)
 }
 

@@ -173,10 +173,10 @@ impl ThemeFile {
         if let Some(folder) = self.icons.get("folder") {
             for e in std::fs::read_dir(abs(folder)).into_iter().flatten().flatten() {
                 let path = e.path();
-                if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("svg")) {
-                    if let Some(name) = path.file_stem() {
-                        icons.insert(name.to_string_lossy().into_owned(), path.display().to_string());
-                    }
+                if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("svg"))
+                    && let Some(name) = path.file_stem()
+                {
+                    icons.insert(name.to_string_lossy().into_owned(), path.display().to_string());
                 }
             }
         }

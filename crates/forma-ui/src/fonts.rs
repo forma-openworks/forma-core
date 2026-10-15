@@ -208,10 +208,13 @@ fn face(family: Option<&str>, weight: u16, italic: bool, fallback: &[&str]) -> O
     family.and_then(|f| load_face(f, weight, italic)).or_else(|| load_first(fallback))
 }
 
+/// Добавки шрифтов от программы (см. [`register_extra`]).
+type Extras = std::sync::RwLock<Vec<fn(&mut FontDefinitions)>>;
+
 /// Свои семейства программ (например, шрифт формул у заметок): дописываются к шрифтам
 /// платформы при каждой установке.
-fn extras() -> &'static std::sync::RwLock<Vec<fn(&mut FontDefinitions)>> {
-    static EXTRAS: OnceLock<std::sync::RwLock<Vec<fn(&mut FontDefinitions)>>> = OnceLock::new();
+fn extras() -> &'static Extras {
+    static EXTRAS: OnceLock<Extras> = OnceLock::new();
     EXTRAS.get_or_init(Default::default)
 }
 
