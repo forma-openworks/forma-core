@@ -77,6 +77,8 @@ where
             .with_min_inner_size(spec.min_size)
             .with_icon(spec.icon()),
         wgpu_options: egui_wgpu::WgpuConfiguration { wgpu_setup: setup.into(), ..Default::default() },
+        // Развёрнутое в прошлый раз окно не мелькает пустым при запуске.
+        window_builder: Some(Box::new(caption::start_unmaximized)),
         // Размер и положение окна eframe хранит рядом с остальными настройками.
         persistence_path: spec.config_dir().map(|d| d.join("window")),
         ..Default::default()

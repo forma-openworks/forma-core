@@ -28,7 +28,7 @@ syntect = { version = "5.3", default-features = false, features = ["default-fanc
 # Своя шапка окна: скругление углов окна без системной рамки в Windows 11.
 [target.'cfg(windows)'.dependencies]
 raw-window-handle = "0.6"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_UI_HiDpi"] }
 
 [build-dependencies]
 forma-build.workspace = true

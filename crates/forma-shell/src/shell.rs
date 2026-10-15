@@ -373,6 +373,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
 
     /// Начало кадра: тема, шрифты, плагины, проверка раскладки.
     pub fn begin_frame(&mut self, ctx: &egui::Context) {
+        crate::caption::finish_start(ctx);
         self.apply_style(ctx);
         self.poll_plugins(ctx);
         if self.layout.active >= self.layout.workspaces.len() {

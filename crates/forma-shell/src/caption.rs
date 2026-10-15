@@ -223,3 +223,58 @@ pub fn round_corners(cc: &eframe::CreationContext<'_>) {
 
 #[cfg(not(windows))]
 pub fn round_corners(_cc: &eframe::CreationContext<'_>) {}
+
+/// Окно было развёрнуто в прошлый раз — развернуть его, когда первый кадр уже на экране.
+static START_MAXIMIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Окно, развёрнутое в прошлый раз, создаётся обычным, но размером с рабочую область
+/// монитора. Иначе winit показывает развёрнутое окно сразу при создании, ещё пустым, а
+/// eframe прячет его до первого кадра: при запуске мелькало пустое окно, и программа
+/// появлялась только через секунду-две. Развернётся окно в [`finish_start`].
+pub(crate) fn start_unmaximized(builder: egui::ViewportBuilder) -> egui::ViewportBuilder {
+    if builder.maximized != Some(true) {
+        return builder;
+    }
+    START_MAXIMIZED.store(true, std::sync::atomic::Ordering::Relaxed);
+    let builder = builder.with_maximized(false);
+    match work_area(builder.position) {
+        Some(area) => builder.with_position(area.min).with_inner_size(area.size()),
+        None => builder,
+    }
+}
+
+/// Разворачивает окно, развёрнутое в прошлый раз: после первого кадра, когда eframe его
+/// уже показал (размер тот же — со стороны ничего не меняется).
+pub(crate) fn finish_start(ctx: &egui::Context) {
+    if ctx.cumulative_frame_nr() >= 1 && START_MAXIMIZED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        ctx.send_viewport_cmd(ViewportCommand::Maximized(true));
+    }
+}
+
+/// Рабочая область (без панели задач) монитора, где лежит точка `pos`, — в точках egui.
+#[cfg(windows)]
+fn work_area(pos: Option<egui::Pos2>) -> Option<egui::Rect> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint};
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+    // У развёрнутого окна угол чуть за краем экрана (-8, -8): берём точку внутри.
+    let p = pos.unwrap_or_default();
+    unsafe {
+        let monitor = MonitorFromPoint(POINT { x: p.x as i32 + 16, y: p.y as i32 + 16 }, MONITOR_DEFAULTTONEAREST);
+        let mut info: MONITORINFO = std::mem::zeroed();
+        info.cbSize = size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(monitor, &raw mut info) == 0 {
+            return None;
+        }
+        let (mut dpi_x, mut dpi_y) = (96u32, 96u32);
+        GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &raw mut dpi_x, &raw mut dpi_y);
+        let scale = dpi_x.max(1) as f32 / 96.0;
+        let r = info.rcWork;
+        Some(egui::Rect::from_min_max(egui::pos2(r.left as f32, r.top as f32) / scale, egui::pos2(r.right as f32, r.bottom as f32) / scale))
+    }
+}
+
+#[cfg(not(windows))]
+fn work_area(_pos: Option<egui::Pos2>) -> Option<egui::Rect> {
+    None
+}
