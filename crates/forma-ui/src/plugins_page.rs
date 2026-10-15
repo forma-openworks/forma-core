@@ -212,7 +212,7 @@ fn installed(ui: &mut Ui, pal: &Palette, filter: &str, plugins: &Plugins, catalo
                 if crate::icons::button(ui, "trash", false).on_hover_text(t!("plugins-uninstall")).clicked() {
                     actions.push(Action::Uninstall(id.clone()));
                 }
-                if ui.checkbox(&mut enabled, t!("plugins-enabled")).changed() {
+                if crate::widgets::checkbox(ui, pal, &mut enabled, t!("plugins-enabled")).changed() {
                     settings.set_enabled(&id, enabled);
                 }
             },

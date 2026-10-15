@@ -203,6 +203,97 @@ pub fn header_button(ui: &mut Ui, pal: &Palette, icon: &str) -> egui::Response {
     resp
 }
 
+/// Сторона квадрата флажка и диаметр кружка переключателя.
+const MARK: f32 = 15.0;
+/// Отступ подписи от отметки.
+const MARK_GAP: f32 = 8.0;
+/// Где начинается подпись флажка или переключателя — чтобы выровнять под ней пояснение.
+pub const CHECK_INDENT: f32 = MARK + MARK_GAP;
+
+/// Вид отметки: квадрат — независимый выбор, круг — один вариант из нескольких.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    Square,
+    Round,
+}
+
+/// Флажок — квадрат: независимый выбор («да или нет»). Щелчок меняет `checked`.
+pub fn checkbox(ui: &mut Ui, pal: &Palette, checked: &mut bool, text: impl Into<egui::WidgetText>) -> egui::Response {
+    let mut resp = marked(ui, pal, Mark::Square, *checked, text.into());
+    if resp.clicked() {
+        *checked = !*checked;
+        resp.mark_changed();
+    }
+    resp
+}
+
+/// Переключатель — круг: один вариант из нескольких. `selected` — выбран ли этот вариант;
+/// что делать по щелчку, решает вызывающий (или [`radio_value`]).
+pub fn radio(ui: &mut Ui, pal: &Palette, selected: bool, text: impl Into<egui::WidgetText>) -> egui::Response {
+    marked(ui, pal, Mark::Round, selected, text.into())
+}
+
+/// Переключатель варианта `value`: щелчок делает его текущим (`current`).
+pub fn radio_value<T: PartialEq>(ui: &mut Ui, pal: &Palette, current: &mut T, value: T, text: impl Into<egui::WidgetText>) -> egui::Response {
+    let mut resp = radio(ui, pal, *current == value, text);
+    if resp.clicked() && *current != value {
+        *current = value;
+        resp.mark_changed();
+    }
+    resp
+}
+
+/// Отметка с подписью — общее у флажка и переключателя. Длинная подпись переносится (если
+/// так настроен `ui`), отметка стоит по её первой строке.
+fn marked(ui: &mut Ui, pal: &Palette, mark: Mark, on: bool, text: egui::WidgetText) -> egui::Response {
+    let galley = text.into_galley(ui, None, (ui.available_width() - CHECK_INDENT).max(20.0), egui::TextStyle::Button);
+    let height = galley.size().y.max(ui.spacing().interact_size.y).max(MARK);
+    let (rect, resp) = ui.allocate_exact_size(vec2(CHECK_INDENT + galley.size().x, height), Sense::click());
+    let kind = if mark == Mark::Square { egui::WidgetType::Checkbox } else { egui::WidgetType::RadioButton };
+    resp.widget_info(|| egui::WidgetInfo::selected(kind, ui.is_enabled(), on, galley.text()));
+    if !ui.is_rect_visible(rect) {
+        return resp;
+    }
+    let enabled = ui.is_enabled();
+    let hovered = enabled && resp.hovered();
+    let dim = |c: Color32| if enabled { c } else { c.gamma_multiply(0.45) };
+    let text_pos = pos2(rect.left() + CHECK_INDENT, rect.center().y - galley.size().y / 2.0);
+    let first_row = galley.rows.first().map_or(galley.size().y, |r| r.rect().height());
+    let center = pos2(rect.left() + MARK / 2.0, (text_pos.y + first_row / 2.0).round());
+    let area = Rect::from_center_size(center, vec2(MARK, MARK));
+    let (fill, stroke) = if on {
+        (dim(if hovered { pal.accent.lerp_to_gamma(Color32::WHITE, 0.12) } else { pal.accent }), Stroke::NONE)
+    } else {
+        (if hovered { pal.bg_hover } else { Color32::TRANSPARENT }, Stroke::new(1.0, dim(if hovered { pal.text_muted } else { pal.text_faint })))
+    };
+    let painter = ui.painter();
+    match mark {
+        Mark::Square => {
+            painter.rect(area, CornerRadius::same(3), fill, stroke, egui::StrokeKind::Inside);
+            if on {
+                let at = |x: f32, y: f32| pos2(area.left() + x * MARK, area.top() + y * MARK);
+                painter.add(egui::Shape::line(vec![at(0.24, 0.52), at(0.43, 0.70), at(0.77, 0.31)], Stroke::new(1.8, dim(pal.accent_text))));
+            }
+        }
+        Mark::Round => {
+            painter.circle(center, MARK / 2.0 - stroke.width / 2.0, fill, stroke);
+            if on {
+                painter.circle_filled(center, MARK * 0.19, dim(pal.accent_text));
+            }
+        }
+    }
+    // Фокус с клавиатуры (Tab) — кольцо вокруг отметки.
+    if resp.has_focus() {
+        let ring = Stroke::new(1.5, pal.accent.gamma_multiply(0.7));
+        match mark {
+            Mark::Square => painter.rect_stroke(area.expand(2.5), CornerRadius::same(5), ring, egui::StrokeKind::Middle),
+            Mark::Round => painter.circle_stroke(center, MARK / 2.0 + 2.5, ring),
+        };
+    }
+    painter.galley(text_pos, galley, dim(pal.text));
+    resp
+}
+
 /// Ширина переключателя-сегментов (без растягивания на всю ширину).
 pub fn segmented_width(ui: &Ui, labels: &[&str]) -> f32 {
     let font = FontId::proportional(13.0);

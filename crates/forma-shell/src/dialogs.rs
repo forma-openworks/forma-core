@@ -287,9 +287,9 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         let infos = exportable(&self.app_settings);
         for (id, checked) in &mut e.checked {
             let Some((_, name, about)) = infos.iter().find(|(i, ..)| i == id) else { continue };
-            ui.checkbox(checked, RichText::new(name).color(pal.text));
+            forma_ui::widgets::checkbox(ui, pal, checked, RichText::new(name).color(pal.text));
             ui.horizontal(|ui| {
-                ui.add_space(26.0);
+                ui.add_space(forma_ui::widgets::CHECK_INDENT - ui.spacing().item_spacing.x);
                 ui.label(RichText::new(about).size(11.5).color(pal.text_faint));
             });
             ui.add_space(2.0);
@@ -582,11 +582,11 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
 fn status_row(ui: &mut Ui, pal: &Palette, name: &str, status: &Status, check: Option<&mut bool>, done: bool) {
     match check {
         Some(c) => {
-            ui.checkbox(c, RichText::new(name).color(pal.text));
+            forma_ui::widgets::checkbox(ui, pal, c, RichText::new(name).color(pal.text));
         }
         None => {
             ui.horizontal(|ui| {
-                ui.add_space(26.0);
+                ui.add_space(forma_ui::widgets::CHECK_INDENT - ui.spacing().item_spacing.x);
                 ui.label(RichText::new(name).color(pal.text_muted));
             });
         }
@@ -600,7 +600,7 @@ fn status_row(ui: &mut Ui, pal: &Palette, name: &str, status: &Status, check: Op
         Status::Invalid(e) => ("error", t!("settings-import-invalid", error = e.clone()), pal.danger),
     };
     ui.horizontal(|ui| {
-        ui.add_space(26.0);
+        ui.add_space(forma_ui::widgets::CHECK_INDENT - ui.spacing().item_spacing.x);
         forma_ui::widgets::icon_label(ui, icon, text, 11.5, color);
     });
     ui.add_space(4.0);

@@ -306,7 +306,7 @@ pub fn check(ui: &mut Ui, pal: &Palette, search: &str, label: &str, value: &mut 
             .scope(|ui| {
                 ui.set_max_width(room);
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                ui.checkbox(value, RichText::new(label).color(pal.text))
+                crate::widgets::checkbox(ui, pal, value, RichText::new(label).color(pal.text))
             })
             .inner;
         if !search.trim().is_empty() && matches(label, search) {
