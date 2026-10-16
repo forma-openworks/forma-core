@@ -21,7 +21,11 @@
 //! ```
 //!
 //! Что программа даёт плагину (файлы хранилища, своё хранилище «ключ — значение»,
-//! уведомления, журнал), — в модуле [`host`]; права на это объявляются в манифесте.
+//! уведомления, журнал, открыть панель или ссылку), — в модуле [`host`]; права на файлы и
+//! данные объявляются в манифесте.
+//!
+//! Интерфейс (блоки заметок, панели) плагин описывает деревом элементов из модуля [`ui`]:
+//! `ui::column([ui::heading("…"), ui::button("id", "…")])`. Рисует его программа.
 
 /// Привязки к миру WIT `forma:plugin/plugin` (сгенерированы wit-bindgen).
 #[doc(hidden)]
@@ -35,6 +39,10 @@ pub mod bindings {
 }
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// Дерево элементов интерфейса: что плагин просит нарисовать и события от программы.
+pub use forma_plugin_ui as ui;
 
 /// Что программа даёт плагину.
 pub use bindings::forma::plugin::host;
@@ -50,6 +58,47 @@ pub struct Context {
     pub language: String,
     /// Открыто ли хранилище или проект (иначе файлов нет).
     pub root: bool,
+}
+
+/// Где и с чем вызвали команду (`args` команды).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CommandContext {
+    /// Откуда: `menu`, `key`, `block`, `panel`, `find-action`.
+    pub from: String,
+    /// Заметка или файл (путь от корня), если вызвали из неё.
+    pub note: String,
+    /// Выделенный текст.
+    pub selection: String,
+    /// Заголовок раздела, в котором выделение или курсор.
+    pub heading: String,
+    /// Абзац вокруг выделения или курсора.
+    pub paragraph: String,
+    /// `args` кнопки, которая запустила команду.
+    #[serde(skip_serializing_if = "Value::is_null")]
+    pub args: Value,
+}
+
+impl CommandContext {
+    pub fn from_json(json: &str) -> Self {
+        serde_json::from_str(json).unwrap_or_default()
+    }
+}
+
+/// С чем рисуется панель.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PanelContext {
+    /// Текущая заметка или файл (путь от корня).
+    pub note: String,
+    /// Тёмная ли тема.
+    pub dark: bool,
+}
+
+impl PanelContext {
+    pub fn from_json(json: &str) -> Self {
+        serde_json::from_str(json).unwrap_or_default()
+    }
 }
 
 /// Плагин: создаётся при первом вызове (`activate`) и живёт, пока работает программа.
@@ -68,15 +117,24 @@ pub trait Plugin: 'static {
         None
     }
 
-    /// Блок заметки на языке `lang` → дерево элементов (JSON).
-    fn render_block(&mut self, lang: &str, _source: &str, _context: &str) -> Result<String, String> {
+    /// Блок заметки на языке `lang` → дерево элементов.
+    fn render_block(&mut self, lang: &str, _source: &str, _context: &str) -> Result<ui::Element, String> {
         Err(format!("this plugin has no block {lang:?}"))
     }
 
-    /// Команда `id` из манифеста; `args` и ответ — JSON.
-    fn command(&mut self, id: &str, _args: &str) -> Result<String, String> {
+    /// Команда `id` из манифеста; ответ — JSON (или пустая строка).
+    fn command(&mut self, id: &str, _cx: &CommandContext) -> Result<String, String> {
         Err(format!("this plugin has no command {id:?}"))
     }
+
+    /// Панель `panel` из манифеста → дерево элементов.
+    fn render_panel(&mut self, panel: &str, _cx: &PanelContext) -> Result<ui::Element, String> {
+        Err(format!("this plugin has no panel {panel:?}"))
+    }
+
+    /// Событие элемента панели. После него программа рисует панель заново
+    /// ([`Plugin::render_panel`]).
+    fn panel_event(&mut self, _panel: &str, _event: &ui::Event) {}
 }
 
 /// Запись в журнал программы.
@@ -117,6 +175,18 @@ pub mod rt {
     pub fn with<R>(f: impl FnOnce(&mut dyn Plugin) -> R) -> Option<R> {
         PLUGIN.with(|p| p.borrow_mut().as_mut().map(|p| f(p.as_mut())))
     }
+
+    /// Панель: событие (если есть) и новое дерево — JSON для программы.
+    pub fn panel(panel: &str, event: Option<&str>, context: &str) -> Result<String, String> {
+        with(|p| {
+            if let Some(e) = event {
+                let e = crate::ui::Event::from_json(e)?;
+                p.panel_event(panel, &e);
+            }
+            p.render_panel(panel, &crate::PanelContext::from_json(context)).map(|t| t.to_json())
+        })
+        .unwrap_or_else(|| Err("the plugin is not activated".into()))
+    }
 }
 
 /// Регистрирует тип плагина. Вызывается один раз в crate плагина.
@@ -140,11 +210,19 @@ macro_rules! register_plugin {
             }
 
             fn render_block(lang: String, source: String, context: String) -> Result<String, String> {
-                $crate::rt::with(|p| p.render_block(&lang, &source, &context)).unwrap_or_else(|| Err("the plugin is not activated".into()))
+                $crate::rt::with(|p| p.render_block(&lang, &source, &context).map(|t| t.to_json())).unwrap_or_else(|| Err("the plugin is not activated".into()))
             }
 
             fn command(id: String, args: String) -> Result<String, String> {
-                $crate::rt::with(|p| p.command(&id, &args)).unwrap_or_else(|| Err("the plugin is not activated".into()))
+                $crate::rt::with(|p| p.command(&id, &$crate::CommandContext::from_json(&args))).unwrap_or_else(|| Err("the plugin is not activated".into()))
+            }
+
+            fn render_panel(panel: String, context: String) -> Result<String, String> {
+                $crate::rt::panel(&panel, None, &context)
+            }
+
+            fn panel_event(panel: String, event: String, context: String) -> Result<String, String> {
+                $crate::rt::panel(&panel, Some(&event), &context)
             }
         }
 

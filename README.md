@@ -42,6 +42,7 @@ Apps built on Forma Core:
 | `forma-plugins` | Plugins: the `.fpl` format and `forma-plugin.toml` manifest, dependency checks like a mod loader, installing, removing, turning on and off |
 | `forma-plugin-host` | Runs plugin code: WebAssembly components in a wasmtime sandbox, API `forma:plugin@1.0.0` described in WIT |
 | `forma-plugin-api` | The SDK for plugin authors: implement `Plugin`, call `register_plugin!`, build for `wasm32-wasip2` |
+| `forma-plugin-ui` | The element tree a plugin describes its UI with (blocks, panels), like `UILayout` in Blender add-ons; the app draws it with `forma_ui::elements` |
 | `forma-i18n` | Localization with Fluent, the `t!` macro, translation completeness checks; the platform's own strings |
 | `forma-build` | Build-script helpers: embedding `.ftl` translations, the Windows icon and version info |
 
@@ -106,6 +107,7 @@ Forma Core — ядро, на котором построены программ
 | `forma-plugins` | Плагины: формат `.fpl` и манифест `forma-plugin.toml`, проверка зависимостей, как у загрузчика модов, установка, удаление, включение и выключение |
 | `forma-plugin-host` | Запуск code плагинов: компоненты WebAssembly в песочнице wasmtime, API `forma:plugin@1.0.0` на WIT |
 | `forma-plugin-api` | SDK для авторов плагинов: реализовать `Plugin`, вызвать `register_plugin!`, собрать под `wasm32-wasip2` |
+| `forma-plugin-ui` | Дерево элементов, которым плагин описывает интерфейс (блоки, панели), как `UILayout` у аддонов Blender; рисует его программа через `forma_ui::elements` |
 | `forma-i18n` | Локализация на Fluent, макрос `t!`, проверка полноты переводов; строки самой платформы |
 | `forma-build` | Помощники сборочных скриптов: вшивание переводов `.ftl`, значка и сведений о версии для Windows |
 

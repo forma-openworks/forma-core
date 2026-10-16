@@ -65,6 +65,8 @@ lucide! {
     "palette" => "palette",
     "keyboard" => "keyboard",
     "fonts" => "type",
+    "book" => "book-open",
+    "link" => "link",
     "all" => "asterisk",
     // Проблемы и логи.
     "crash" => "bomb",

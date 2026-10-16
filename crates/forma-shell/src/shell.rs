@@ -19,6 +19,9 @@ use std::sync::Arc;
 
 use eframe::egui;
 use forma_actions::{Context as ActionContext, Registry, Shortcut};
+
+/// Группа действий с командами плагинов (ключ перевода).
+pub const PLUGIN_ACTIONS: &str = "action-group-plugins";
 use forma_i18n::t;
 use forma_layout::DockStyle;
 use forma_plugins::{CatalogEntry, Plugins};
@@ -261,6 +264,8 @@ pub struct Shell<S: AppSettings, B: Builtin> {
     pub plugin_report: forma_plugins::Report,
     /// Code плагинов (песочница WebAssembly); `None` — песочница не запустилась.
     pub plugin_runtime: Option<forma_plugin_host::Runtime>,
+    /// Команды плагинов, которые сейчас зарегистрированы как действия.
+    plugin_commands: Vec<forma_plugin_host::CommandInfo>,
     /// Экран приветствия вместо рабочего интерфейса.
     pub welcome: bool,
     pub(crate) modal: Option<Modal<S>>,
@@ -354,6 +359,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
             plugins,
             plugin_report,
             plugin_runtime,
+            plugin_commands: Vec::new(),
             welcome: true,
             modal: None,
             app_modal: false,
@@ -754,15 +760,46 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         // Code плагинов — за работающими плагинами; что плагины сообщают — внизу окна.
         let language = self.settings.appearance.effective_language();
         let mut notices = Vec::new();
+        let mut commands = None;
         if let Some(rt) = &mut self.plugin_runtime {
             rt.set_language(&language);
             rt.sync(self.plugins.installed(), &self.plugin_report, false);
             notices = rt.take_notices();
+            commands = Some(rt.commands());
+        }
+        if let Some(commands) = commands.filter(|c| *c != self.plugin_commands) {
+            self.register_plugin_commands(commands);
         }
         for n in notices {
             let name = self.plugins.get(&n.plugin).map(|p| p.manifest.title().to_owned()).unwrap_or(n.plugin);
             self.toast(format!("{name}: {}", n.text), n.error);
         }
+    }
+
+    /// Команды плагинов — действиями в группе «Плагины»: их видно в «Найти действие» и в
+    /// раскладке клавиш, у них сочетания из манифеста (`key`), которые можно переназначить.
+    /// Сработавшую команду программа получает, как свои действия, из [`Shell::process`].
+    fn register_plugin_commands(&mut self, commands: Vec<forma_plugin_host::CommandInfo>) {
+        self.actions.retain(|a| a.group != PLUGIN_ACTIONS);
+        for c in &commands {
+            if self.actions.get(&c.id).is_some() {
+                log::warn!("Plugin {}: command {} has the id of an app action", c.plugin, c.id);
+                continue;
+            }
+            self.actions.register(forma_actions::Action {
+                id: c.id.clone(),
+                group: PLUGIN_ACTIONS.to_owned(),
+                title: forma_actions::Title::Text(c.title.clone()),
+                defaults: c.key.as_deref().and_then(Shortcut::parse).into_iter().collect(),
+                context: ActionContext::Global,
+            });
+        }
+        self.plugin_commands = commands;
+    }
+
+    /// Команда плагина ли это (id действия).
+    pub fn is_plugin_command(&self, id: &str) -> bool {
+        self.plugin_commands.iter().any(|c| c.id == id)
     }
 
     /// Распаковывает плагин из файла и показывает окно согласия: что он приносит и что просит.

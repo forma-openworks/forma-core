@@ -618,6 +618,21 @@ pub fn context_menu(resp: &egui::Response, add: impl FnOnce(&mut egui::Ui)) {
         .show(add);
 }
 
+/// Контекстное меню у указателя без отдельного виджета: для целой области (режим чтения
+/// заметки), где правый щелчок ловит вызывающий. `open` — открыть сейчас; дальше меню
+/// живёт само, пока не выберут пункт или не щёлкнут мимо.
+pub fn context_menu_at(ui: &egui::Ui, id: egui::Id, open: bool, add: impl FnOnce(&mut egui::Ui)) {
+    use egui::containers::menu::MenuConfig;
+    egui::Popup::new(id, ui.ctx().clone(), egui::PopupAnchor::PointerFixed, ui.layer_id())
+        .kind(egui::PopupKind::Menu)
+        .layout(egui::Layout::top_down_justified(egui::Align::Min))
+        .style(menu_style)
+        .gap(0.0)
+        .open_memory(open.then_some(egui::SetOpenCommand::Bool(true)))
+        .info(egui::UiStackInfo::new(egui::UiKind::Menu).with_tag_value(MenuConfig::MENU_CONFIG_TAG, menu_config()))
+        .show(add);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1764,6 +1764,7 @@ dependencies = [
 name = "forma-plugin-api"
 version = "0.1.0"
 dependencies = [
+ "forma-plugin-ui",
  "serde",
  "serde_json",
  "wit-bindgen 0.63.0",
@@ -1779,6 +1780,14 @@ dependencies = [
  "serde_json",
  "wasmtime",
  "wasmtime-wasi",
+]
+
+[[package]]
+name = "forma-plugin-ui"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1839,6 +1848,7 @@ dependencies = [
  "forma-actions",
  "forma-i18n",
  "forma-layout",
+ "forma-plugin-ui",
  "forma-plugins",
  "forma-settings",
  "log",

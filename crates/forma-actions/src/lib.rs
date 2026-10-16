@@ -64,6 +64,12 @@ impl Registry {
         self.actions.push(action);
     }
 
+    /// Оставляет только действия, для которых `keep` вернёт `true` (например, убрать команды
+    /// плагинов перед тем, как зарегистрировать их заново).
+    pub fn retain(&mut self, keep: impl FnMut(&Action) -> bool) {
+        self.actions.retain(keep);
+    }
+
     pub fn get(&self, id: &str) -> Option<&Action> {
         self.actions.iter().find(|a| a.id == id)
     }

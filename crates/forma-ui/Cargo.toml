@@ -17,7 +17,7 @@ forma-layout.workspace = true
 forma-actions.workspace = true
 forma-settings.workspace = true
 forma-plugins.workspace = true
+forma-plugin-ui.workspace = true
+serde_json.workspace = true
 resvg = { version = "0.48.1", default-features = false }
 
-[dev-dependencies]
-serde_json.workspace = true

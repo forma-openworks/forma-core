@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use forma_plugin_host::Runtime;
+use forma_plugin_host::{Request, Runtime};
 use forma_plugins::{Installed, check, read_manifest};
 
 #[test]
@@ -39,6 +39,20 @@ fn terms_plugin_reads_the_glossary_and_answers_hovers() {
     assert!(uv.markdown.contains("preview") && uv.markdown.contains("Stage 6"), "{}", uv.markdown);
     assert!(rt.hover(text, at("крыла"), "x.md").is_none(), "не term — нет подсказки");
     assert!(rt.hover(text, at("loop"), "Глоссарий.md").is_none(), "на самом глоссарии подсказки не нужны");
+
+    // Панель, меню выделенного текста, команда и блок.
+    assert!(rt.panels().iter().any(|p| p.key() == "terms/glossary"));
+    assert_eq!(rt.menu("selection").first().map(|c| c.id.as_str()), Some("terms.find"));
+    let panel = rt.render_panel("terms", "glossary", "{}").expect("готов").expect("дерево");
+    assert!(panel.contains("edge loop") && panel.contains(r#""type":"list""#), "{panel}");
+    rt.command("terms.find", r#"{"from":"menu","selection":" UV "}"#).expect("команда есть").expect("выполнилась");
+    assert_eq!(rt.take_requests(), vec![Request::OpenPanel { plugin: "terms".into(), panel: "glossary".into() }]);
+    let panel = rt.render_panel("terms", "glossary", "{}").unwrap().unwrap();
+    assert!(panel.contains("Stage 6"), "открыта карточка UV: {panel}");
+    let panel = rt.panel_event("terms", "glossary", r#"{"id":"query","kind":"change","value":"кольц"}"#, "{}").unwrap().unwrap();
+    assert!(panel.contains("Найдено: 1 из 2"), "{panel}");
+    let block = rt.render_block("terms", "UV\nnope\n", "{}").unwrap().unwrap();
+    assert!(block.contains("развёртка") && block.contains("nope: нет в Глоссарии"), "{block}");
     assert!(rt.failure("terms").is_none());
     let _ = std::fs::remove_dir_all(&vault);
 }

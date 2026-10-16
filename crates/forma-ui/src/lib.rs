@@ -5,12 +5,14 @@
 pub use egui;
 
 pub mod appearance;
+pub mod elements;
 pub mod find_action;
 pub mod font_page;
 pub mod fonts;
 pub mod icons;
 pub mod keymap_page;
 pub mod plugins_page;
+pub mod selection;
 pub mod settings_window;
 pub mod theme;
 pub mod theme_tools;

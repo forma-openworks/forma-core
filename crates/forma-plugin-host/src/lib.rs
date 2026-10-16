@@ -11,7 +11,9 @@
 //!   сразу получает `activate`;
 //! - каждый вызов ограничен по времени (эпохи wasmtime) и по памяти: зависший или упавший
 //!   плагин отключается до перезапуска программы, а программа показывает почему
-//!   ([`Runtime::take_notices`]).
+//!   ([`Runtime::take_notices`]);
+//! - о чём плагин просит программу (открыть панель, ссылку), программа забирает через
+//!   [`Runtime::take_requests`] и делает сама.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -45,6 +47,42 @@ pub struct Notice {
     pub error: bool,
 }
 
+/// О чём плагин просит программу.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Request {
+    /// Показать панель (открыть, если её нет) и нарисовать заново.
+    OpenPanel { plugin: String, panel: String },
+    /// Нарисовать панель заново.
+    RefreshPanel { plugin: String, panel: String },
+    /// Открыть заметку или файл по цели ссылки (`цель#раздел`).
+    OpenLink { plugin: String, target: String },
+}
+
+/// Панель плагина (вклад `panels`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PanelInfo {
+    pub plugin: String,
+    pub id: String,
+    pub title: String,
+    pub icon: Option<String>,
+}
+
+impl PanelInfo {
+    /// Постоянный ключ панели: `плагин/панель`.
+    pub fn key(&self) -> String {
+        format!("{}/{}", self.plugin, self.id)
+    }
+}
+
+/// Команда плагина (вклад `commands`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandInfo {
+    pub plugin: String,
+    pub id: String,
+    pub title: String,
+    pub key: Option<String>,
+}
+
 /// Подсказка при наведении: к каким символам текста она относится (в символах Unicode) и
 /// что показать (markdown).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +103,7 @@ struct State {
     data_file: Option<PathBuf>,
     data: Option<BTreeMap<String, String>>,
     notices: Arc<Mutex<Vec<Notice>>>,
+    requests: Arc<Mutex<Vec<Request>>>,
 }
 
 impl WasiView for State {
@@ -91,6 +130,12 @@ impl State {
             return Err(format!("path {rel:?} leaves the vault"));
         }
         Ok(root.join(rel))
+    }
+
+    fn request(&self, r: Request) {
+        if let Ok(mut q) = self.requests.lock() {
+            q.push(r);
+        }
     }
 
     fn data_map(&mut self) -> &mut BTreeMap<String, String> {
@@ -167,6 +212,18 @@ impl forma::plugin::host::Host for State {
         let json = serde_json::to_string_pretty(self.data_map()).map_err(|e| e.to_string())?;
         std::fs::write(&file, json).map_err(|e| e.to_string())
     }
+
+    fn open_panel(&mut self, panel: String) {
+        self.request(Request::OpenPanel { plugin: self.plugin.clone(), panel });
+    }
+
+    fn refresh_panel(&mut self, panel: String) {
+        self.request(Request::RefreshPanel { plugin: self.plugin.clone(), panel });
+    }
+
+    fn open_link(&mut self, target: String) {
+        self.request(Request::OpenLink { plugin: self.plugin.clone(), target });
+    }
 }
 
 /// Скомпилированный модуль плагина (компиляция идёт в фоне).
@@ -215,6 +272,10 @@ pub struct Runtime {
     data_dir: Option<PathBuf>,
     slots: Vec<Slot>,
     notices: Arc<Mutex<Vec<Notice>>>,
+    requests: Arc<Mutex<Vec<Request>>>,
+    /// Растёт, когда меняется то, что плагины нарисовали бы иначе: набор плагинов, хранилище,
+    /// язык, отключённый плагин. Программа по нему сбрасывает свои кеши блоков и панелей.
+    generation: u64,
 }
 
 /// Движок wasmtime — один на программу, с часами для ограничения времени вызовов.
@@ -248,12 +309,35 @@ impl Runtime {
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker).map_err(|e| e.to_string())?;
         Plugin::add_to_linker::<State, HasSelf<State>>(&mut linker, |s| s).map_err(|e| e.to_string())?;
-        Ok(Self { engine, linker, app: app.to_owned(), language: String::new(), root: None, data_dir, slots: Vec::new(), notices: Arc::default() })
+        Ok(Self {
+            engine,
+            linker,
+            app: app.to_owned(),
+            language: String::new(),
+            root: None,
+            data_dir,
+            slots: Vec::new(),
+            notices: Arc::default(),
+            requests: Arc::default(),
+            generation: 0,
+        })
     }
 
-    /// Язык интерфейса — его получит `activate` следующих экземпляров.
+    /// Поколение плагинов: растёт, когда старые ответы плагинов (блоки, панели) больше не
+    /// годятся.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Язык интерфейса. Сменился — экземпляры создаются заново и узнают новый язык.
     pub fn set_language(&mut self, language: &str) {
-        self.language = language.to_owned();
+        if self.language != language {
+            self.language = language.to_owned();
+            for s in &mut self.slots {
+                s.live = None;
+            }
+            self.generation += 1;
+        }
     }
 
     /// Открытое хранилище или проект. Сменился — экземпляры создаются заново.
@@ -263,6 +347,7 @@ impl Runtime {
             for s in &mut self.slots {
                 s.live = None;
             }
+            self.generation += 1;
         }
     }
 
@@ -291,6 +376,7 @@ impl Runtime {
             }
         }
         self.slots = slots;
+        self.generation += 1;
     }
 
     /// Компилирует модуль плагина в фоне.
@@ -332,9 +418,61 @@ impl Runtime {
         self.slots.iter().filter(|s| s.failed.is_none()).flat_map(|s| s.manifest.contributes.blocks.iter().map(|b| b.lang.clone())).collect()
     }
 
+    /// Рисует ли блок ` ```lang ` какой-нибудь плагин; его название, если есть.
+    pub fn block(&self, lang: &str) -> Option<String> {
+        self.slots.iter().filter(|s| s.failed.is_none()).flat_map(|s| &s.manifest.contributes.blocks).find(|b| b.lang.eq_ignore_ascii_case(lang)).map(|b| b.title.clone())
+    }
+
+    /// Панели всех плагинов с code (и отключённых — их панель покажет почему).
+    pub fn panels(&self) -> Vec<PanelInfo> {
+        self.slots
+            .iter()
+            .flat_map(|s| {
+                s.manifest.contributes.panels.iter().map(|p| PanelInfo {
+                    plugin: s.id().to_owned(),
+                    id: p.id.clone(),
+                    title: if p.title.is_empty() { p.id.clone() } else { p.title.clone() },
+                    icon: p.icon.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Команды работающих плагинов.
+    pub fn commands(&self) -> Vec<CommandInfo> {
+        self.slots
+            .iter()
+            .filter(|s| s.failed.is_none())
+            .flat_map(|s| {
+                s.manifest.contributes.commands.iter().map(|c| CommandInfo {
+                    plugin: s.id().to_owned(),
+                    id: c.id.clone(),
+                    title: if c.title.is_empty() { c.id.clone() } else { c.title.clone() },
+                    key: c.key.clone(),
+                })
+            })
+            .collect()
+    }
+
+    /// Пункты меню `place` (`selection`, `note`): команды в порядке плагинов и манифеста.
+    pub fn menu(&self, place: &str) -> Vec<CommandInfo> {
+        let commands = self.commands();
+        self.slots
+            .iter()
+            .filter(|s| s.failed.is_none())
+            .flat_map(|s| s.manifest.contributes.menus.iter().filter(|m| m.place == place))
+            .filter_map(|m| commands.iter().find(|c| c.id == m.command).cloned())
+            .collect()
+    }
+
     /// Уведомления с прошлого раза.
     pub fn take_notices(&mut self) -> Vec<Notice> {
         self.notices.lock().map(|mut n| std::mem::take(&mut *n)).unwrap_or_default()
+    }
+
+    /// Просьбы плагинов к программе с прошлого раза.
+    pub fn take_requests(&mut self) -> Vec<Request> {
+        self.requests.lock().map(|mut r| std::mem::take(&mut *r)).unwrap_or_default()
     }
 
     /// Готовит экземпляр плагина `i`: создаёт и активирует при первом вызове. `false` —
@@ -363,6 +501,7 @@ impl Runtime {
             data_file: self.data_dir.as_ref().map(|d| d.join(&id).join("data.json")),
             data: None,
             notices: self.notices.clone(),
+            requests: self.requests.clone(),
         };
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limits);
@@ -396,6 +535,7 @@ impl Runtime {
             n.push(Notice { plugin: slot.id().to_owned(), text: reason.clone(), error: true });
         }
         slot.failed = Some(reason);
+        self.generation += 1;
     }
 
     /// Вызов в экземпляр плагина `i` с ограничением времени. Ловушка или зависание
@@ -445,6 +585,28 @@ impl Runtime {
     pub fn command(&mut self, id: &str, args: &str) -> Option<Result<String, String>> {
         let i = self.slots.iter().position(|s| s.manifest.contributes.commands.iter().any(|c| c.id == id))?;
         self.call(i, |b, s| b.call_command(s, id, args))
+    }
+
+    fn slot_of(&self, plugin: &str) -> Option<usize> {
+        self.slots.iter().position(|s| s.id() == plugin)
+    }
+
+    /// Панель `panel` плагина `plugin` → дерево элементов (JSON). `None` — модуль ещё
+    /// компилируется или плагин отключён (почему — [`Runtime::failure`]).
+    pub fn render_panel(&mut self, plugin: &str, panel: &str, context: &str) -> Option<Result<String, String>> {
+        let i = self.slot_of(plugin)?;
+        self.call(i, |b, s| b.call_render_panel(s, panel, context))
+    }
+
+    /// Событие элемента панели → новое дерево панели (JSON).
+    pub fn panel_event(&mut self, plugin: &str, panel: &str, event: &str, context: &str) -> Option<Result<String, String>> {
+        let i = self.slot_of(plugin)?;
+        self.call(i, |b, s| b.call_panel_event(s, panel, event, context))
+    }
+
+    /// Готовится ли ещё модуль плагина (компилируется в фоне).
+    pub fn pending(&self, plugin: &str) -> bool {
+        self.slots.iter().find(|s| s.id() == plugin).is_some_and(|s| matches!(&*s.compiled.lock().expect("lock"), Compiled::Pending))
     }
 
     /// В хранилище поменялись файлы: работающие экземпляры узнают об этом.

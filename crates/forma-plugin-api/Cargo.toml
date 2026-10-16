@@ -9,3 +9,4 @@ license.workspace = true
 wit-bindgen = "0.63"
 serde.workspace = true
 serde_json.workspace = true
+forma-plugin-ui.workspace = true

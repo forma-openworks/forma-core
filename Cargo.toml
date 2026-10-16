@@ -19,6 +19,7 @@ forma-plugins = { path = "crates/forma-plugins" }
 forma-shell = { path = "crates/forma-shell" }
 forma-plugin-host = { path = "crates/forma-plugin-host" }
 forma-plugin-api = { path = "crates/forma-plugin-api" }
+forma-plugin-ui = { path = "crates/forma-plugin-ui" }
 
 eframe = { version = "0.36", default-features = false, features = [
     "wgpu_no_default_features",

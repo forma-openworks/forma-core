@@ -2,8 +2,9 @@
 /// умеет сам (экспорты мира `plugin`). Плагин — компонент WebAssembly (`wasm32-wasip2`),
 /// работает в песочнице и видит только то, что разрешено в `[permissions]` его манифеста.
 ///
-/// Тексты сложной формы (контекст, дерево элементов блока) передаются JSON-строками: так их
-/// можно расширять без новой версии API, а SDK `forma-plugin-api` даёт к ним типы.
+/// Тексты сложной формы (контекст, дерево элементов, события) передаются JSON-строками: так
+/// их можно расширять без новой версии API, а SDK `forma-plugin-api` даёт к ним типы. Дерево
+/// элементов описано в crate `forma-plugin-ui`.
 package forma:plugin@1.0.0;
 
 /// Общие типы.
@@ -64,6 +65,16 @@ interface host {
     /// Своё хранилище «ключ — значение» плагина, сохраняется между запусками. Право `data`.
     data-get: func(key: string) -> option<string>;
     data-set: func(key: string, value: string) -> result<_, string>;
+
+    /// Показать панель плагина `panel` (id из манифеста): открыть, если её нет, и нарисовать
+    /// заново (`render-panel`).
+    open-panel: func(panel: string);
+
+    /// Нарисовать панель заново: у плагина поменялось то, что она показывает.
+    refresh-panel: func(panel: string);
+
+    /// Открыть заметку или файл по цели ссылки, как `[[цель#раздел]]` в заметке.
+    open-link: func(target: string);
 }
 
 world plugin {
@@ -84,6 +95,14 @@ world plugin {
     /// Блок заметки (` ```lang `) → дерево элементов (JSON), которое рисует программа.
     export render-block: func(lang: string, source: string, context: string) -> result<string, string>;
 
-    /// Команда из манифеста; `args` и ответ — JSON.
+    /// Команда из манифеста. `args` — JSON: где её вызвали (`from`: `menu`, `key`, `block`,
+    /// `panel`), заметка, выделенный текст, заголовок над ним, абзац и `args` кнопки. Ответ —
+    /// JSON (или пустая строка).
     export command: func(id: string, args: string) -> result<string, string>;
+
+    /// Панель плагина → дерево элементов (JSON). `context` — JSON: текущая заметка.
+    export render-panel: func(panel: string, context: string) -> result<string, string>;
+
+    /// Событие элемента панели (JSON: `id`, `kind`, `value`) → новое дерево панели.
+    export panel-event: func(panel: string, event: string, context: string) -> result<string, string>;
 }
