@@ -106,6 +106,8 @@ struct State {
     data: Option<BTreeMap<String, String>>,
     notices: Arc<Mutex<Vec<Notice>>>,
     requests: Arc<Mutex<Vec<Request>>>,
+    /// Действующие значения настроек всех работающих плагинов (общие с [`Runtime`]).
+    settings: Arc<Mutex<BTreeMap<String, serde_json::Value>>>,
 }
 
 impl WasiView for State {
@@ -236,6 +238,14 @@ impl forma::plugin::host::Host for State {
     fn open_link(&mut self, target: String) {
         self.request(Request::OpenLink { plugin: self.plugin.clone(), target });
     }
+
+    fn setting(&mut self, key: String) -> Option<String> {
+        // Только свои настройки: чужие ключи плагину не видны.
+        if !key.starts_with(&format!("{}.", self.plugin)) {
+            return None;
+        }
+        self.settings.lock().ok()?.get(&key).map(|v| v.to_string())
+    }
 }
 
 /// Скомпилированный модуль плагина (компиляция идёт в фоне).
@@ -285,6 +295,7 @@ pub struct Runtime {
     slots: Vec<Slot>,
     notices: Arc<Mutex<Vec<Notice>>>,
     requests: Arc<Mutex<Vec<Request>>>,
+    settings: Arc<Mutex<BTreeMap<String, serde_json::Value>>>,
     /// Растёт, когда меняется то, что плагины нарисовали бы иначе: набор плагинов, хранилище,
     /// язык, отключённый плагин. Программа по нему сбрасывает свои кеши блоков и панелей.
     generation: u64,
@@ -331,6 +342,7 @@ impl Runtime {
             slots: Vec::new(),
             notices: Arc::default(),
             requests: Arc::default(),
+            settings: Arc::default(),
             generation: 0,
         })
     }
@@ -348,6 +360,17 @@ impl Runtime {
             for s in &mut self.slots {
                 s.live = None;
             }
+            self.generation += 1;
+        }
+    }
+
+    /// Действующие значения настроек плагинов (ключ → значение). Плагины читают их
+    /// функцией `setting`; блоки и панели рисуются заново, раз значения другие.
+    pub fn set_settings(&mut self, values: BTreeMap<String, serde_json::Value>) {
+        if let Ok(mut s) = self.settings.lock()
+            && *s != values
+        {
+            *s = values;
             self.generation += 1;
         }
     }
@@ -514,6 +537,7 @@ impl Runtime {
             data: None,
             notices: self.notices.clone(),
             requests: self.requests.clone(),
+            settings: self.settings.clone(),
         };
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limits);

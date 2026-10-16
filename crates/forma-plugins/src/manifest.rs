@@ -43,7 +43,7 @@ pub const LEGACY_MANIFEST: &str = "plugin.toml";
 
 /// Версия API плагинов, которую понимает эта платформа.
 pub fn api_version() -> semver::Version {
-    semver::Version::new(1, 0, 0)
+    semver::Version::new(1, 1, 0)
 }
 
 /// Вид плагина — категория на странице «Плагины». В новом манифесте её можно не писать:
@@ -217,6 +217,10 @@ pub struct Contributes {
     pub panels: Vec<PanelDecl>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hovers: Vec<HoverDecl>,
+    /// Настройки плагина (API 1.1): окно настроек строит по ним страницу, значения лежат в
+    /// `settings.json` программы, code читает их функцией `setting`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub settings: Vec<forma_settings::schema::Setting>,
     /// Вклады, которых эта версия платформы не знает: плагин ставится, они пропускаются.
     #[serde(flatten)]
     pub unknown: BTreeMap<String, toml::Value>,
@@ -277,6 +281,7 @@ impl Manifest {
         {
             return Err(format!("bad api range {api:?}"));
         }
+        forma_settings::schema::validate(&m.plugin.id, &m.contributes.settings)?;
         if m.contributes.needs_code() && m.code.is_none() {
             return Err("the plugin brings blocks, commands, panels or hovers but has no [code]".into());
         }
@@ -411,5 +416,35 @@ activate = ["block:pipeline"]
         assert!(!future.api_ok(), "плагин для API 2 этой платформе не подходит");
         assert_eq!(parse_version("1.2"), Some(semver::Version::new(1, 2, 0)));
         assert_eq!(parse_version("latest"), None);
+        assert!(Manifest::parse("[plugin]\nid = \"x\"\napi = \"^1.0\"").unwrap().api_ok(), "плагины для API 1.0 работают и на 1.1");
+    }
+
+    #[test]
+    fn settings_are_declared_like_vs_code_configuration() {
+        let text = r#"
+[plugin]
+id = "terms"
+
+[[contributes.settings]]
+key = "terms.hovers"
+type = "boolean"
+default = true
+title = "Подсказки при наведении"
+
+[[contributes.settings]]
+key = "terms.style"
+type = "string"
+default = "dotted"
+enum = [{ value = "dotted", title = "Точки" }, { value = "none", title = "Без линии" }]
+"#;
+        let m = Manifest::parse(text).unwrap();
+        let s = &m.contributes.settings;
+        assert_eq!((s[0].key.as_str(), s[0].default.clone()), ("terms.hovers", serde_json::json!(true)));
+        assert_eq!(s[1].choices[1].title, "Без линии");
+        assert_eq!(Manifest::parse(&m.to_toml()).unwrap(), m, "манифест с настройками пишется и читается");
+        let foreign = "[plugin]\nid = \"terms\"\n[[contributes.settings]]\nkey = \"rust.x\"\ntype = \"boolean\"\ndefault = true";
+        assert!(Manifest::parse(foreign).is_err(), "чужой ключ");
+        let bad_default = "[plugin]\nid = \"terms\"\n[[contributes.settings]]\nkey = \"terms.n\"\ntype = \"integer\"\ndefault = \"x\"";
+        assert!(Manifest::parse(bad_default).is_err());
     }
 }

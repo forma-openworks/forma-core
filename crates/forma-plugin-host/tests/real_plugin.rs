@@ -18,7 +18,7 @@ fn terms_plugin_reads_the_glossary_and_answers_hovers() {
     std::fs::write(vault.join("Глоссарий.md"), "- **edge loop** — кольцо рёбер вокруг сетки. → [[2.3 Петли#Edge loop]]\n- **UV** — развёртка поверхности на плоскость. *preview* → [[1.1 Знакомство#UV]]\n").unwrap();
     std::fs::write(vault.join(".model-kit").join("terms.md"), "| Term | Статус | Глава | Зависит от | Подробно — |\n|---|---|---|---|---|\n| UV | preview | 1.1 | — | Stage 6 |\n").unwrap();
 
-    let plugin = Installed { manifest: read_manifest(&dir).unwrap(), dir: dir.clone(), dev: true };
+    let plugin = Installed { manifest: read_manifest(&dir).unwrap(), dir: dir.clone(), dev: true, builtin: false };
     let plugins = vec![plugin];
     let report = check(&plugins, "holotype", |_| true);
     assert!(report.works("terms"), "{:?}", report.problems("terms"));

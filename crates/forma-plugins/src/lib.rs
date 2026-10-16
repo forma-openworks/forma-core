@@ -73,6 +73,9 @@ pub struct Installed {
     pub dir: PathBuf,
     /// Подключён из папки разработчика, а не установлен.
     pub dev: bool,
+    /// Встроен в программу (как плагин Rust в Instar): его нельзя удалить, только выключить.
+    /// Папки у него нет.
+    pub builtin: bool,
 }
 
 /// Распакованный, но ещё не поставленный плагин: программа показывает, что он приносит и что
@@ -99,7 +102,7 @@ impl Installed {
 
     /// Папка с темами плагина, если он их приносит.
     pub fn themes_dir(&self) -> Option<PathBuf> {
-        self.manifest.contributes.themes.as_ref().map(|t| self.dir.join(t))
+        self.manifest.contributes.themes.as_ref().filter(|_| !self.builtin).map(|t| self.dir.join(t))
     }
 }
 
@@ -160,6 +163,8 @@ pub struct Plugins {
     /// Папки плагинов в разработке.
     dev_dirs: Vec<PathBuf>,
     installed: Vec<Installed>,
+    /// Встроенные плагины программы — всегда в начале списка.
+    builtin: Vec<Manifest>,
     jobs: HashMap<String, Arc<Mutex<JobState>>>,
     /// Последняя ошибка установки по id — показывается, пока не начнётся новая.
     errors: HashMap<String, String>,
@@ -169,7 +174,7 @@ pub struct Plugins {
 impl Plugins {
     /// `root` — папка плагинов: `%LOCALAPPDATA%\Forma\<программа>\plugins`.
     pub fn new(root: Option<PathBuf>) -> Self {
-        let mut p = Self { root, dev_dirs: Vec::new(), installed: Vec::new(), jobs: HashMap::new(), errors: HashMap::new(), events: Vec::new() };
+        let mut p = Self { root, dev_dirs: Vec::new(), installed: Vec::new(), builtin: Vec::new(), jobs: HashMap::new(), errors: HashMap::new(), events: Vec::new() };
         p.scan();
         p
     }
@@ -187,6 +192,16 @@ impl Plugins {
         }
     }
 
+    /// Встроенные плагины программы: в списке они первыми, у них нет папки и их нельзя
+    /// удалить. Код у них свой, в самой программе, а платформа знает о них манифест:
+    /// название, описание, настройки — и включены ли они.
+    pub fn set_builtin(&mut self, manifests: Vec<Manifest>) {
+        if manifests != self.builtin {
+            self.builtin = manifests;
+            self.scan();
+        }
+    }
+
     /// Перечитывает папку плагинов и папки разработчика.
     pub fn scan(&mut self) {
         self.installed.clear();
@@ -200,7 +215,7 @@ impl Plugins {
                     continue;
                 }
                 match read_manifest(&dir) {
-                    Ok(manifest) if manifest.plugin.id == name => self.installed.push(Installed { manifest, dir, dev: false }),
+                    Ok(manifest) if manifest.plugin.id == name => self.installed.push(Installed { manifest, dir, dev: false, builtin: false }),
                     Ok(manifest) => log::warn!("Plugin folder {name} holds plugin {}; skipped", manifest.plugin.id),
                     Err(err) => log::warn!("Plugin {name} is broken: {err}"),
                 }
@@ -208,11 +223,13 @@ impl Plugins {
         }
         for dir in &self.dev_dirs {
             match read_manifest(dir) {
-                Ok(manifest) => self.installed.push(Installed { manifest, dir: dir.clone(), dev: true }),
+                Ok(manifest) => self.installed.push(Installed { manifest, dir: dir.clone(), dev: true, builtin: false }),
                 Err(err) => log::warn!("Plugin in development at {} is broken: {err}", dir.display()),
             }
         }
         self.installed.sort_by_key(|p| (p.manifest.title().to_lowercase(), p.dev));
+        let builtin = self.builtin.iter().map(|m| Installed { manifest: m.clone(), dir: PathBuf::new(), dev: false, builtin: true });
+        self.installed.splice(0..0, builtin);
     }
 
     pub fn installed(&self) -> &[Installed] {
@@ -330,7 +347,8 @@ impl Plugins {
 
     /// Удаляет плагин с диска. Программа сначала отпускает его файлы (останавливает сервер).
     pub fn uninstall(&mut self, id: &str) -> Result<(), String> {
-        let dir = self.get(id).map(|p| p.dir.clone()).ok_or_else(|| format!("plugin {id} is not installed"))?;
+        let plugin = self.installed.iter().find(|p| p.id() == id && !p.builtin).ok_or_else(|| format!("plugin {id} is not installed"))?;
+        let dir = plugin.dir.clone();
         std::fs::remove_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         self.scan();
         self.events.push(Event::Removed(id.to_owned()));
@@ -625,6 +643,22 @@ id = \"pink\"")] },
         let plugins = Plugins::new(Some(root.clone()));
         assert_eq!(plugins.installed().iter().map(|p| p.id()).collect::<Vec<_>>(), vec!["pink"]);
         assert_eq!(plugins.get("pink").unwrap().themes_dir(), Some(root.join("pink").join("themes")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn builtin_plugins_come_first_and_stay() {
+        let root = temp("builtin");
+        std::fs::create_dir_all(root.join("pink")).unwrap();
+        std::fs::write(root.join("pink").join(MANIFEST), "[plugin]\nid = \"pink\"\nname = \"Pink\"").unwrap();
+        let mut plugins = Plugins::new(Some(root.clone()));
+        plugins.set_builtin(vec![Manifest::parse("[plugin]\nid = \"rust\"\nname = \"Rust\"").unwrap()]);
+        let ids: Vec<(&str, bool)> = plugins.installed().iter().map(|p| (p.id(), p.builtin)).collect();
+        assert_eq!(ids, vec![("rust", true), ("pink", false)]);
+        plugins.scan();
+        assert!(plugins.get("rust").is_some_and(|p| p.builtin), "перечитывание папки их не теряет");
+        assert!(plugins.uninstall("rust").is_err(), "встроенный плагин не удалить");
+        assert!(check(plugins.installed(), "instar", |_| true).works("rust"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

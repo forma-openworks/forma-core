@@ -90,6 +90,8 @@ pub enum Footer {
     Apply,
     Export,
     Import,
+    /// Значок «Открыть settings.json» над страницей (как у Settings в VS Code).
+    OpenJson,
 }
 
 #[derive(Debug, Default)]
@@ -147,9 +149,11 @@ impl SettingsWindow {
     }
 
     /// Рисует окно размером не больше `max` и возвращает нажатую внизу кнопку.
-    /// `modified(id)` — есть ли на странице непримённые изменения, `dirty` — хоть где-то.
+    /// `modified(id)` — есть ли на странице непримённые изменения, `dirty` — хоть где-то;
+    /// `json(id)` — показать ли над страницей значок «Открыть settings.json».
     #[allow(clippy::too_many_arguments)]
-    pub fn show(&mut self, ui: &mut Ui, pal: &Palette, max: egui::Vec2, pages: &[PageInfo], modified: &dyn Fn(&str) -> bool, dirty: bool, body: &mut dyn FnMut(&mut Ui, &str, &str)) -> Option<Footer> {
+    pub fn show(&mut self, ui: &mut Ui, pal: &Palette, max: egui::Vec2, pages: &[PageInfo], modified: &dyn Fn(&str) -> bool, dirty: bool, json: &dyn Fn(&str) -> bool, body: &mut dyn FnMut(&mut Ui, &str, &str)) -> Option<Footer> {
+        let mut header_action = None;
         let size = vec2(max.x.min(1040.0), max.y.min(720.0)).max(vec2(200.0, 200.0));
         let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
         let narrow = size.x < NARROW_W;
@@ -266,6 +270,13 @@ impl SettingsWindow {
                         ui.label(RichText::new("›").size(14.5).color(pal.text_faint));
                     }
                     ui.label(RichText::new(&page.title).size(17.0).family(crate::fonts::semibold()).color(pal.heading));
+                    if json(&page.id) {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if crate::icons::button(ui, "file-json", false).on_hover_text(t!("settings-open-json")).clicked() {
+                                header_action = Some(Footer::OpenJson);
+                            }
+                        });
+                    }
                 });
             }
             if let Some(text) = &page.description {
@@ -284,7 +295,7 @@ impl SettingsWindow {
 
         let footer = Rect::from_min_max(pos2(right.left(), right.bottom() - FOOTER_H), right.max);
         ui.painter().hline(footer.x_range(), footer.top(), Stroke::new(1.0, pal.border));
-        footer_buttons(ui, pal, footer.shrink2(vec2(if narrow { 14.0 } else { 20.0 }, 11.0)), dirty)
+        footer_buttons(ui, pal, footer.shrink2(vec2(if narrow { 14.0 } else { 20.0 }, 11.0)), dirty).or(header_action)
     }
 
     fn search_field(&mut self, ui: &mut Ui) {

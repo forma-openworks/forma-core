@@ -145,6 +145,23 @@ pub fn log(level: Level, message: impl AsRef<str>) {
     let _ = (level, message);
 }
 
+/// Значение своей настройки (`[[contributes.settings]]` манифеста, API 1.1): из
+/// `settings.json`, а если там нет или не подходит — по умолчанию. Человек может поменять
+/// её в любой момент, поэтому её читают там, где она нужна, а не один раз при запуске.
+///
+/// ```ignore
+/// if !forma_plugin_api::setting::<bool>("terms.hovers").unwrap_or(true) { return None; }
+/// ```
+pub fn setting<T: serde::de::DeserializeOwned>(key: &str) -> Option<T> {
+    #[cfg(target_arch = "wasm32")]
+    return host::setting(key).and_then(|json| serde_json::from_str(&json).ok());
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = key;
+        None
+    }
+}
+
 /// Как плагин живёт внутри компонента: один экземпляр на модуль.
 #[doc(hidden)]
 pub mod rt {

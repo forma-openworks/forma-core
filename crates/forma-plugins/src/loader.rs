@@ -162,7 +162,7 @@ mod tests {
 
     fn plugin(text: &str) -> Installed {
         let manifest = Manifest::parse(text).unwrap();
-        Installed { dir: PathBuf::from(&manifest.plugin.id), manifest, dev: false }
+        Installed { dir: PathBuf::from(&manifest.plugin.id), manifest, dev: false, builtin: false }
     }
 
     #[test]

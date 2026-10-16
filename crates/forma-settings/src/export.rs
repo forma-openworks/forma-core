@@ -51,9 +51,14 @@ impl Archive {
 
     pub fn add<C: Component>(&mut self, c: &C) {
         if let Ok(v) = serde_json::to_value(c) {
-            self.manifest.components.push(C::ID.to_owned());
-            self.components.insert(C::ID.to_owned(), v);
+            self.add_value(C::ID, v);
         }
+    }
+
+    /// То, что не компонент (значения `settings.json`), — под своим id.
+    pub fn add_value(&mut self, id: &str, value: serde_json::Value) {
+        self.manifest.components.push(id.to_owned());
+        self.components.insert(id.to_owned(), value);
     }
 
     pub fn write(&self, path: &Path) -> std::io::Result<()> {

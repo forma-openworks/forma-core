@@ -24,7 +24,9 @@ use forma_actions::{Context as ActionContext, Registry, Shortcut};
 pub const PLUGIN_ACTIONS: &str = "action-group-plugins";
 use forma_i18n::t;
 use forma_layout::DockStyle;
-use forma_plugins::{CatalogEntry, Plugins};
+use forma_plugins::{CatalogEntry, Manifest, Plugins};
+use forma_settings::schema::Setting;
+use forma_settings::user::{Poll, UserSettings};
 use forma_settings::{AppInfo, Store};
 use forma_ui::appearance::ZOOM_RANGE;
 use forma_ui::find_action::FindAction;
@@ -97,6 +99,11 @@ impl Spec {
         self.app_id.strip_prefix("forma-").unwrap_or(self.app_id)
     }
 
+    /// Настройки плагинов: `<настройки>\settings.json`, как у VS Code.
+    pub fn user_settings_path(&self) -> Option<PathBuf> {
+        self.config_dir().map(|d| d.join("settings.json"))
+    }
+
     /// Раскладка, когда программа не указала свой файл раскладки.
     pub fn global_layout_path(&self) -> Option<PathBuf> {
         self.config_dir().map(|d| d.join("layout.json"))
@@ -165,6 +172,8 @@ pub enum ShellCmd<B> {
     RemovePluginFolder(PathBuf),
     /// Перечитать плагины.
     ReloadPlugins,
+    /// Открыть `settings.json` (в программе, если она умеет, иначе в программе по умолчанию).
+    OpenSettingsJson,
     About,
     Quit,
 }
@@ -266,6 +275,14 @@ pub struct Shell<S: AppSettings, B: Builtin> {
     pub plugin_runtime: Option<forma_plugin_host::Runtime>,
     /// Команды плагинов, которые сейчас зарегистрированы как действия.
     plugin_commands: Vec<forma_plugin_host::CommandInfo>,
+    /// `settings.json`: значения настроек плагинов.
+    pub user: UserSettings,
+    /// С какими значениями и плагинами code плагинов последний раз получил настройки.
+    runtime_settings: Option<(u64, Vec<String>)>,
+    /// Программа сама открывает текстовые файлы (Instar — в своём редакторе): тогда
+    /// `settings.json` ждёт её в [`Shell::take_open_files`], а не открывается в системе.
+    pub edit_in_app: bool,
+    open_files: Vec<PathBuf>,
     /// Экран приветствия вместо рабочего интерфейса.
     pub welcome: bool,
     pub(crate) modal: Option<Modal<S>>,
@@ -360,6 +377,10 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
             plugin_report,
             plugin_runtime,
             plugin_commands: Vec::new(),
+            user: UserSettings::open(spec.user_settings_path()),
+            runtime_settings: None,
+            edit_in_app: false,
+            open_files: Vec::new(),
             welcome: true,
             modal: None,
             app_modal: false,
@@ -416,6 +437,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         crate::caption::finish_start(ctx);
         self.apply_style(ctx);
         self.poll_plugins(ctx);
+        self.poll_user_settings();
         // Плагин `.fpl`, брошенный в окно, ставится через окно согласия; программа его не видит.
         let dropped: Vec<PathBuf> = ctx.input_mut(|i| {
             let (fpl, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut i.raw.dropped_files).into_iter().partition(|f| f.path().extension().is_some_and(|e| e.eq_ignore_ascii_case("fpl")));
@@ -637,6 +659,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
                     open_folder(root);
                 }
             }
+            ShellCmd::OpenSettingsJson => self.open_settings_json(),
             ShellCmd::About => self.modal = Some(Modal::About),
             ShellCmd::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
         }
@@ -747,7 +770,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
             }
         }
         // Список установленных — в настройках, чтобы экспорт знал, какие плагины переносить.
-        let installed: Vec<String> = self.plugins.installed().iter().map(|p| p.id().to_owned()).collect();
+        let installed: Vec<String> = self.plugins.installed().iter().filter(|p| !p.builtin).map(|p| p.id().to_owned()).collect();
         if self.settings.plugins.installed != installed {
             self.settings.plugins.installed = installed;
         }
@@ -761,9 +784,17 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         let language = self.settings.appearance.effective_language();
         let mut notices = Vec::new();
         let mut commands = None;
+        // Настройки — code тех плагинов, что работают; заново, когда поменялись значения или
+        // набор плагинов.
+        let settings_key = (self.user.rev(), self.plugin_report.order.clone());
+        let settings = (self.runtime_settings.as_ref() != Some(&settings_key)).then(|| self.effective_settings());
         if let Some(rt) = &mut self.plugin_runtime {
             rt.set_language(&language);
             rt.sync(self.plugins.installed(), &self.plugin_report, false);
+            if let Some(values) = settings {
+                rt.set_settings(values);
+                self.runtime_settings = Some(settings_key);
+            }
             notices = rt.take_notices();
             commands = Some(rt.commands());
         }
@@ -800,6 +831,92 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
     /// Команда плагина ли это (id действия).
     pub fn is_plugin_command(&self, id: &str) -> bool {
         self.plugin_commands.iter().any(|c| c.id == id)
+    }
+
+    /// Встроенные плагины программы (их манифесты, обычно без `[code]`: код у них свой, в самой
+    /// программе). Они видны на странице «Плагины», их можно выключить, но не удалить, а их
+    /// настройки — в окне настроек и `settings.json`. Работать ли их коду, программа узнаёт
+    /// у [`Shell::plugin_works`].
+    pub fn set_builtin_plugins(&mut self, manifests: Vec<Manifest>) {
+        self.plugins.set_builtin(manifests);
+        self.plugin_report = crate::plugins::report(&self.plugins, &self.settings.plugins, self.spec.plugin_app());
+    }
+
+    /// Работает ли плагин: установлен (или встроен), включён и всего ему хватает.
+    pub fn plugin_works(&self, id: &str) -> bool {
+        self.plugin_report.works(id)
+    }
+
+    /// Настройки работающих плагинов: id плагина, его название и схема.
+    pub fn plugin_settings(&self) -> Vec<(String, String, Vec<Setting>)> {
+        self.plugins
+            .installed()
+            .iter()
+            .filter(|p| !p.manifest.contributes.settings.is_empty() && self.plugin_report.works(p.id()))
+            .map(|p| (p.id().to_owned(), p.manifest.title().to_owned(), p.manifest.contributes.settings.clone()))
+            .collect()
+    }
+
+    /// Схема настройки по ключу (у работающих плагинов).
+    pub fn setting_schema(&self, key: &str) -> Option<Setting> {
+        let plugin = key.split('.').next()?;
+        let p = self.plugins.installed().iter().find(|p| p.id() == plugin && self.plugin_report.works(p.id()))?;
+        p.manifest.contributes.settings.iter().find(|s| s.key == key).cloned()
+    }
+
+    /// Значение настройки плагина: из `settings.json`, если оно там есть и подходит, иначе
+    /// по умолчанию. Незнакомый ключ — то, что в файле (или `null`).
+    pub fn setting(&self, key: &str) -> serde_json::Value {
+        match self.setting_schema(key) {
+            Some(s) => s.effective(self.user.get(key)),
+            None => self.user.get(key).cloned().unwrap_or_default(),
+        }
+    }
+
+    pub fn setting_bool(&self, key: &str) -> bool {
+        self.setting(key).as_bool().unwrap_or(false)
+    }
+
+    pub fn setting_f64(&self, key: &str) -> f64 {
+        self.setting(key).as_f64().unwrap_or(0.0)
+    }
+
+    pub fn setting_str(&self, key: &str) -> String {
+        self.setting(key).as_str().unwrap_or_default().to_owned()
+    }
+
+    /// Номер изменения `settings.json`: вырос — настройки плагинов стоит перечитать.
+    pub fn settings_rev(&self) -> u64 {
+        self.user.rev()
+    }
+
+    /// Все действующие значения настроек работающих плагинов.
+    fn effective_settings(&self) -> BTreeMap<String, serde_json::Value> {
+        self.plugin_settings().into_iter().flat_map(|(_, _, list)| list).map(|s| (s.key.clone(), s.effective(self.user.get(&s.key)))).collect()
+    }
+
+    /// Раз в секунду: не поправили ли `settings.json` руками. Ошибка в нём — уведомление со
+    /// строкой и столбцом, а действуют прежние значения.
+    fn poll_user_settings(&mut self) {
+        if let Poll::Broken(e) = self.user.poll(self.now()) {
+            let error = forma_ui::plugin_settings::parse_error_text(&e);
+            self.toast(t!("toast-settings-json-broken", line = e.line, col = e.col, error = error), true);
+        }
+    }
+
+    /// Открывает `settings.json` (новый — с `{}`): в программе, если она открывает файлы сама
+    /// ([`Shell::edit_in_app`]), иначе в программе по умолчанию.
+    pub fn open_settings_json(&mut self) {
+        match self.user.ensure_file() {
+            Ok(path) if self.edit_in_app => self.open_files.push(path),
+            Ok(path) => open_folder(&path),
+            Err(e) => self.toast(t!("toast-settings-json-write-failed", error = forma_ui::plugin_settings::write_error_text(&e)), true),
+        }
+    }
+
+    /// Файлы, которые оболочка просит программу открыть (`settings.json`).
+    pub fn take_open_files(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.open_files)
     }
 
     /// Распаковывает плагин из файла и показывает окно согласия: что он приносит и что просит.

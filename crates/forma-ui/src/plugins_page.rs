@@ -34,6 +34,8 @@ pub enum Action {
     RemoveDevFolder(PathBuf),
     /// Перечитать плагины (после правок в папке разработчика).
     Reload,
+    /// Открыть страницу настроек плагина.
+    Settings(String),
 }
 
 /// Что не так с плагином — одной строкой.
@@ -78,6 +80,9 @@ pub fn brings(m: &Manifest) -> Vec<String> {
     }
     if !c.hovers.is_empty() {
         out.push(t!("plugin-brings-hovers", list = list(c.hovers.iter().map(|h| h.title.clone()).collect())));
+    }
+    if !c.settings.is_empty() {
+        out.push(t!("plugin-brings-settings", count = c.settings.len()));
     }
     if m.code.is_some() {
         out.push(t!("plugin-brings-code"));
@@ -286,11 +291,13 @@ fn installed(ui: &mut Ui, pal: &Palette, filter: &str, plugins: &Plugins, report
         let broken = enabled && !problems.is_empty();
         let failure = failures.iter().find(|(f, _)| *f == id).map(|(_, e)| e.clone()).filter(|_| enabled);
         let dev = p.dev;
+        let builtin = p.builtin;
+        let has_settings = !p.manifest.contributes.settings.is_empty();
         let dir = p.dir.clone();
         card(
             ui,
             pal,
-            if dev { "installed-dev" } else { "installed" },
+            if dev { "installed-dev" } else if builtin { "installed-builtin" } else { "installed" },
             icon_of(entry, p.manifest.kind()),
             &title,
             |ui| {
@@ -302,8 +309,14 @@ fn installed(ui: &mut Ui, pal: &Palette, filter: &str, plugins: &Plugins, report
                 let version = if meta.version.is_empty() || meta.version == "latest" { String::new() } else { t!("plugins-version", version = meta.version.clone()) };
                 let authors = p.manifest.authors().join(", ");
                 let dev_label = if dev { t!("plugins-dev") } else { String::new() };
-                meta_line(ui, pal, &[kind, version, authors, meta.license.clone(), dev_label], &meta.homepage);
-                ui.add(egui::Label::new(RichText::new(dir.display().to_string()).size(11.0).color(pal.text_faint)).truncate()).on_hover_text(if dev { t!("plugins-dev-hint") } else { dir.display().to_string() });
+                if builtin {
+                    // Встроенный: папки нет, вместо неё — что это значит.
+                    meta_line(ui, pal, &[t!("plugins-builtin"), version, authors, meta.license.clone()], &meta.homepage);
+                    ui.label(RichText::new(t!("plugins-builtin-hint")).size(11.0).color(pal.text_faint));
+                } else {
+                    meta_line(ui, pal, &[kind, version, authors, meta.license.clone(), dev_label], &meta.homepage);
+                    ui.add(egui::Label::new(RichText::new(dir.display().to_string()).size(11.0).color(pal.text_faint)).truncate()).on_hover_text(if dev { t!("plugins-dev-hint") } else { dir.display().to_string() });
+                }
                 // Включённый плагин, который не работает: чего ему не хватает.
                 if broken {
                     ui.add_space(2.0);
@@ -329,8 +342,12 @@ fn installed(ui: &mut Ui, pal: &Palette, filter: &str, plugins: &Plugins, report
                     if crate::icons::button(ui, "close", false).on_hover_text(t!("plugins-remove-dev")).clicked() {
                         actions.push(Action::RemoveDevFolder(dir.clone()));
                     }
-                } else if crate::icons::button(ui, "trash", false).on_hover_text(t!("plugins-uninstall")).clicked() {
+                } else if !builtin && crate::icons::button(ui, "trash", false).on_hover_text(t!("plugins-uninstall")).clicked() {
                     actions.push(Action::Uninstall(id.clone()));
+                }
+                // Настройки плагина — как «Extension Settings» у шестерёнки в VS Code.
+                if has_settings && enabled && crate::icons::button(ui, "settings", false).on_hover_text(t!("plugins-settings")).clicked() {
+                    actions.push(Action::Settings(id.clone()));
                 }
                 if crate::widgets::checkbox(ui, pal, &mut enabled, t!("plugins-enabled")).changed() {
                     settings.set_enabled(&id, enabled);

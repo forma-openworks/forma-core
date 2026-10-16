@@ -4,6 +4,7 @@
 //! Окно настроек работает с черновиком: изменения видны в нём сразу, а к программе
 //! применяются кнопками «Применить» и «ОК». «Отмена» и Escape их отбрасывают.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use eframe::egui::{self, Key, Margin, RichText, TextEdit, Ui, vec2};
@@ -17,6 +18,7 @@ use forma_ui::find_action::{FindAction, Item};
 use forma_ui::font_page::{self, FontPage};
 use forma_ui::fonts::Fonts;
 use forma_ui::keymap_page::{self, KeymapPage};
+use forma_ui::plugin_settings;
 use forma_ui::plugins_page::{self, PluginsPage};
 use forma_ui::settings_window::{self as sw, Footer, PageInfo, SettingsWindow, order};
 use forma_ui::theme::{Origin, Palette};
@@ -31,6 +33,9 @@ use crate::workspace::Builtin;
 /// Пункты «Найти действие», которые открывают страницу настроек.
 const SETTINGS_ITEM: &str = "settings:";
 
+/// Значения `settings.json` в архиве экспорта.
+pub(crate) const PLUGIN_SETTINGS: &str = "plugin-settings";
+
 pub(crate) struct SettingsDialog<S> {
     window: SettingsWindow,
     draft: PlatformSettings,
@@ -38,6 +43,8 @@ pub(crate) struct SettingsDialog<S> {
     keymap: KeymapPage,
     fonts: FontPage,
     plugins: PluginsPage,
+    /// Черновик значений `settings.json` (только отличные от значений по умолчанию).
+    user: BTreeMap<String, serde_json::Value>,
 }
 
 /// Компоненты платформы, которые можно перенести экспортом: id, название, что внутри.
@@ -47,6 +54,7 @@ fn platform_exportable() -> Vec<(&'static str, String, String)> {
         (Fonts::ID, t!("settings-page-fonts"), t!("settings-component-fonts")),
         (Keymap::ID, t!("settings-page-keymap"), t!("settings-component-keymap")),
         (PluginSettings::ID, t!("settings-page-plugins"), t!("settings-component-plugins")),
+        (PLUGIN_SETTINGS, t!("settings-page-plugin-settings"), t!("settings-component-plugin-settings")),
     ]
 }
 
@@ -91,6 +99,7 @@ pub(crate) fn plugin_cmd<B>(action: plugins_page::Action) -> ShellCmd<B> {
         plugins_page::Action::AddDevFolder => ShellCmd::AddPluginFolder,
         plugins_page::Action::RemoveDevFolder(dir) => ShellCmd::RemovePluginFolder(dir),
         plugins_page::Action::Reload => ShellCmd::ReloadPlugins,
+        plugins_page::Action::Settings(id) => ShellCmd::OpenSettingsPage(plugin_settings::page_id(&id)),
     }
 }
 
@@ -105,6 +114,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
             keymap: KeymapPage::default(),
             fonts: FontPage,
             plugins: PluginsPage::default(),
+            user: self.user.values().clone(),
         })));
     }
 
@@ -125,8 +135,21 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
             PageInfo::new(keymap_page::PAGE, t!("settings-page-keymap")).icon("keyboard").order(order::KEYMAP).keywords(keymap_page::keywords(&self.actions)),
             PageInfo::new(plugins_page::PAGE, t!("settings-page-plugins")).icon("plugin").order(order::PLUGINS).keywords(plugins_page::keywords()),
         ];
+        // Страницы плагинов с настройками — внутри «Плагинов», как раздел Extensions у VS Code.
+        for (i, (id, title, settings)) in self.plugin_settings().into_iter().enumerate() {
+            pages.push(PageInfo::new(plugin_settings::page_id(&id), title).under(plugins_page::PAGE).order(10 + i as i32).keywords(plugin_settings::keywords(&settings)));
+        }
         pages.extend(self.app_settings.pages());
         pages
+    }
+
+    /// Ключи `settings.json`, которые в черновике не такие, как в файле.
+    fn user_changes(&self, draft: &BTreeMap<String, serde_json::Value>) -> Vec<(String, Option<serde_json::Value>)> {
+        let live = self.user.values();
+        let mut keys: Vec<&String> = draft.keys().chain(live.keys()).collect();
+        keys.sort();
+        keys.dedup();
+        keys.into_iter().filter(|k| draft.get(*k) != live.get(*k)).map(|k| (k.clone(), draft.get(k).cloned())).collect()
     }
 
     /// Применяет черновик настроек к программе и сохраняет его.
@@ -144,6 +167,11 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         self.ctx.set_zoom_factor(self.settings.appearance.zoom);
         self.settings.save(&mut self.store);
         self.app_settings.save(&mut self.store);
+        // Настройки плагинов — в settings.json, только изменённые ключи.
+        let changes = self.user_changes(&d.user);
+        if let Err(e) = self.user.apply(&changes) {
+            self.toast(t!("toast-settings-json-write-failed", error = plugin_settings::write_error_text(&e)), true);
+        }
     }
 
     fn draft_dirty(&self, d: &SettingsDialog<S>) -> bool {
@@ -152,6 +180,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
             || d.draft.keymap != self.settings.keymap
             || d.draft.plugins.disabled != self.settings.plugins.disabled
             || d.app != self.app_settings
+            || !self.user_changes(&d.user).is_empty()
     }
 
     /// Окно настроек. Возвращает `true`, когда его пора закрыть.
@@ -159,12 +188,17 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         let pages = self.settings_pages();
         let live = &self.settings;
         let live_app = &self.app_settings;
+        let schemas = self.plugin_settings();
+        let user_changes = self.user_changes(&d.user);
         let modified = |id: &str| match id {
             appearance::PAGE => d.draft.appearance != live.appearance,
             font_page::PAGE => d.draft.fonts != live.fonts,
             keymap_page::PAGE => d.draft.keymap != live.keymap,
             plugins_page::PAGE => d.draft.plugins.disabled != live.plugins.disabled,
-            other => d.app.page_modified(live_app, other, &d.draft, live),
+            other => match plugin_settings::plugin_of(other) {
+                Some(plugin) => user_changes.iter().any(|(k, _)| k.split('.').next() == Some(plugin)),
+                None => d.app.page_modified(live_app, other, &d.draft, live),
+            },
         };
         // Флаги страниц считаются до отрисовки: черновик меняется внутри страниц.
         let flags: Vec<(String, bool)> = pages.iter().map(|p| (p.id.clone(), modified(&p.id))).collect();
@@ -179,7 +213,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         let draft_id = if d.draft.appearance.theme.is_empty() { self.spec.default_theme.to_owned() } else { d.draft.appearance.theme.clone() };
         let draft_theme = self.themes.resolve(&draft_id, self.spec.default_theme);
         let draft_theme_fonts = draft_theme.fonts.clone();
-        let SettingsDialog { window, draft, app, keymap, fonts, plugins: plugins_ui } = d;
+        let SettingsDialog { window, draft, app, keymap, fonts, plugins: plugins_ui, user } = d;
         let actions = &self.actions;
         let plugins = &self.plugins;
         let report = &self.plugin_report;
@@ -192,16 +226,28 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         let mut plugin_actions = Vec::new();
         let mut appearance_action = None;
         let kit = self.theme_kit();
-        let footer = window.show(ui, pal, max, &pages, &modified, dirty, &mut |ui, page, search| match page {
+        let mut open_json = false;
+        let json = |id: &str| id == plugins_page::PAGE || plugin_settings::plugin_of(id).is_some();
+        let mut footer = window.show(ui, pal, max, &pages, &modified, dirty, &json, &mut |ui, page, search| match page {
             appearance::PAGE => appearance_action = appearance::page(ui, pal, search, &mut draft.appearance, &cx).or(appearance_action),
             theme_tools::INSPECTOR_PAGE => theme_tools::inspector(ui, pal, search, &draft_theme, &kit),
             font_page::PAGE => fonts.ui(ui, pal, search, &mut draft.fonts, &draft_theme_fonts),
             keymap_page::PAGE => keymap.ui(ui, pal, actions, &mut draft.keymap, search),
             plugins_page::PAGE => plugins_ui.ui(ui, pal, search, plugins, report, &failures, &catalog, &mut draft.plugins, &mut plugin_actions),
-            other => app.page_ui(ui, pal, other, search, &mut AppPage { platform: draft, theme: &draft_theme }),
+            other => match plugin_settings::plugin_of(other).and_then(|p| schemas.iter().find(|(id, ..)| id == p)) {
+                Some((plugin, _, settings)) => open_json |= plugin_settings::page(ui, pal, search, plugin, settings, user).is_some(),
+                None => app.page_ui(ui, pal, other, search, &mut AppPage { platform: draft, theme: &draft_theme }),
+            },
         });
+        if open_json {
+            footer = Some(Footer::OpenJson);
+        }
         for action in plugin_actions {
-            self.cmds.push(plugin_cmd(action));
+            match action {
+                // Шестерёнка у плагина — его страница в этом же окне (черновик остаётся).
+                plugins_page::Action::Settings(id) => window.page = plugin_settings::page_id(&id),
+                action => self.cmds.push(plugin_cmd(action)),
+            }
         }
         match appearance_action {
             Some(appearance::PageAction::CreateTheme) => match self.create_theme(&draft_theme, &kit) {
@@ -231,12 +277,17 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
                 false
             }
             Some(Footer::Cancel) => true,
-            Some(f @ (Footer::Export | Footer::Import)) => {
-                // Сначала применяем черновик: экспорт должен взять то, что видно в окне.
+            Some(f @ (Footer::Export | Footer::Import | Footer::OpenJson)) => {
+                // Сначала применяем черновик: экспорт должен взять то, что видно в окне, а в
+                // settings.json должно оказаться то, что выбрано в окне.
                 if self.draft_dirty(d) {
                     self.apply_settings(d);
                 }
-                self.cmds.push(if f == Footer::Export { ShellCmd::ExportSettings } else { ShellCmd::ImportSettings });
+                self.cmds.push(match f {
+                    Footer::Export => ShellCmd::ExportSettings,
+                    Footer::Import => ShellCmd::ImportSettings,
+                    _ => ShellCmd::OpenSettingsJson,
+                });
                 true
             }
             None => false,
@@ -328,6 +379,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
                 Fonts::ID => archive.add(&self.settings.fonts),
                 Keymap::ID => archive.add(&self.settings.keymap),
                 PluginSettings::ID => archive.add(&self.settings.plugins),
+                PLUGIN_SETTINGS => archive.add_value(PLUGIN_SETTINGS, serde_json::Value::Object(self.user.values().clone().into_iter().collect())),
                 other => self.app_settings.export(other, &mut archive),
             }
         }
@@ -385,6 +437,8 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
             Appearance::ID => decode::<Appearance>(value).map_or_else(Status::Invalid, |(_, s)| partial(s)),
             Fonts::ID => decode::<Fonts>(value).map_or_else(Status::Invalid, |(_, s)| partial(s)),
             PluginSettings::ID => decode::<PluginSettings>(value).map_or_else(Status::Invalid, |(_, s)| partial(s)),
+            PLUGIN_SETTINGS if value.is_object() => Status::Apply,
+            PLUGIN_SETTINGS => Status::Invalid(t!("settings-import-not-object")),
             Keymap::ID => match decode::<Keymap>(value) {
                 Ok((mut k, mut skipped)) => {
                     skipped.extend(k.retain_known(&self.actions));
@@ -412,6 +466,15 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
                 // Переносится, что выключено; недостающие плагины предлагаются к установке.
                 if let Ok((p, _)) = decode::<PluginSettings>(value) {
                     self.settings.plugins.disabled = p.disabled;
+                }
+            }
+            PLUGIN_SETTINGS => {
+                // Ключи архива ложатся поверх settings.json; остальные ключи файла остаются.
+                if let Some(map) = value.as_object() {
+                    let changes: Vec<(String, Option<serde_json::Value>)> = map.iter().map(|(k, v)| (k.clone(), Some(v.clone()))).collect();
+                    if let Err(e) = self.user.apply(&changes) {
+                        self.toast(t!("toast-settings-json-write-failed", error = plugin_settings::write_error_text(&e)), true);
+                    }
                 }
             }
             Fonts::ID => {
@@ -534,7 +597,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         }
         // Заработает ли: проверка загрузчика так, будто плагин уже стоит.
         let mut all: Vec<forma_plugins::Installed> = self.plugins.installed().iter().filter(|p| p.id() != m.plugin.id || p.dev).cloned().collect();
-        all.push(forma_plugins::Installed { manifest: m.clone(), dir: std::path::PathBuf::new(), dev: false });
+        all.push(forma_plugins::Installed { manifest: m.clone(), dir: std::path::PathBuf::new(), dev: false, builtin: false });
         let report = forma_plugins::check(&all, self.spec.plugin_app(), |id| self.settings.plugins.enabled(id));
         let problems: Vec<String> = report.problems(&m.plugin.id).iter().map(plugins_page::problem_text).collect();
         if !problems.is_empty() {

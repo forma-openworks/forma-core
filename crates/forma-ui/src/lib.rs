@@ -12,6 +12,7 @@ pub mod font_page;
 pub mod fonts;
 pub mod icons;
 pub mod keymap_page;
+pub mod plugin_settings;
 pub mod plugins_page;
 pub mod selection;
 pub mod settings_window;
