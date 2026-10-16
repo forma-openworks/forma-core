@@ -32,6 +32,12 @@ pub trait Hooks {
     fn image(&mut self, ui: &mut Ui, pal: &Palette, _path: &str, _width: Option<f32>, alt: &str) {
         ui.label(RichText::new(alt).size(12.0).color(pal.text_faint));
     }
+
+    /// Адрес картинки хранилища для загрузчиков egui (`file:///…`), если она есть: для
+    /// картинок на холсте и сравнения «до и после».
+    fn image_uri(&self, _path: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Без особых возможностей: всё рисуется простыми подписями.
@@ -122,7 +128,17 @@ impl Draw<'_> {
                     self.children(ui, children, path);
                 });
             }
-            Element::Group { title, icon, children, collapsible, open } => self.group(ui, title, icon.as_deref(), children, *collapsible, *open, path),
+            Element::Group { title, icon, children, collapsible, open, width } => match width {
+                // Карточка заданной ширины (в строке встают рядом).
+                Some(w) => {
+                    let w = w.min(ui.available_width());
+                    ui.allocate_ui_with_layout(vec2(w, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+                        ui.set_width(w);
+                        self.group(ui, title, icon.as_deref(), children, *collapsible, *open, path);
+                    });
+                }
+                None => self.group(ui, title, icon.as_deref(), children, *collapsible, *open, path),
+            },
             Element::Separator => {
                 let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
                 ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, pal.border));
@@ -237,6 +253,16 @@ impl Draw<'_> {
             Element::Image { path: file, width, alt } => {
                 ui.vertical(|ui| self.hooks.image(ui, pal, file, *width, alt));
             }
+            Element::Canvas { width, height, shapes, pan_zoom, background } => {
+                crate::canvas::canvas(ui, pal, path, *width, *height, shapes, *pan_zoom, background.as_deref(), self.hooks);
+            }
+            Element::Compare { before, after, before_label, after_label } => {
+                crate::canvas::compare(ui, pal, path, before, after, before_label, after_label, self.hooks);
+            }
+            Element::View3d { positions, indices, color, height, wireframe } => {
+                let color = color.as_deref().map(|c| crate::canvas::color(pal, c));
+                crate::view3d::view3d(ui, pal, path, positions, indices, color, *height, *wireframe);
+            }
             Element::Unknown => {
                 ui.label(RichText::new(t!("plugin-ui-unknown")).size(12.0).italics().color(pal.text_faint));
             }
@@ -250,46 +276,55 @@ impl Draw<'_> {
         let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), state_id, open);
         Frame::new().fill(pal.settings_card).stroke(Stroke::new(1.0, pal.border)).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(10)).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            if !title.is_empty() || collapsible {
-                let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), if collapsible { Sense::click() } else { Sense::hover() });
-                let mut x = rect.left();
-                if collapsible {
-                    let openness = state.openness(ui.ctx());
-                    let c = egui::pos2(x + 6.0, rect.center().y);
-                    let color = if resp.hovered() { pal.heading } else { pal.text_muted };
-                    // Шеврон: вправо — свёрнуто, вниз — открыто.
-                    let a = std::f32::consts::FRAC_PI_2 * openness;
-                    let rot = |dx: f32, dy: f32| egui::pos2(c.x + dx * a.cos() - dy * a.sin(), c.y + dx * a.sin() + dy * a.cos());
-                    ui.painter().line(vec![rot(-2.0, -4.0), rot(2.0, 0.0), rot(-2.0, 4.0)], Stroke::new(1.4, color));
-                    x += 16.0;
-                }
-                if let Some(icon) = icon {
-                    let r = egui::Rect::from_center_size(egui::pos2(x + 7.0, rect.center().y), vec2(14.0, 14.0));
-                    crate::icons::paint(ui.painter(), r, icon, pal.text_muted);
-                    x += 20.0;
-                }
-                ui.painter().text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, title, FontId::new(13.0, crate::fonts::semibold()), pal.heading);
-                if collapsible {
-                    if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
-                        state.toggle(ui);
-                    }
-                    state.store(ui.ctx());
-                }
-            }
-            let body = |ui: &mut Ui, d: &mut Self| {
-                ui.add_space(4.0);
-                ui.vertical(|ui| {
-                    ui.spacing_mut().item_spacing.y = GAP;
-                    d.children(ui, children, path);
-                });
-            };
-            if collapsible {
-                let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), state_id, open);
-                state.show_body_unindented(ui, |ui| body(ui, self));
-            } else {
-                body(ui, self);
-            }
+            // Внутри группы — всегда сверху вниз, даже если сама группа стоит в строке.
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| self.group_body(ui, title, icon, children, collapsible, open, path, &mut state));
         });
+    }
+
+    /// Шапка и содержимое группы (уже внутри рамки).
+    #[allow(clippy::too_many_arguments)]
+    fn group_body(&mut self, ui: &mut Ui, title: &str, icon: Option<&str>, children: &[Element], collapsible: bool, open: bool, path: Id, state: &mut egui::collapsing_header::CollapsingState) {
+        let pal = self.pal;
+        let state_id = path.with("group");
+        if !title.is_empty() || collapsible {
+            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), if collapsible { Sense::click() } else { Sense::hover() });
+            let mut x = rect.left();
+            if collapsible {
+                let openness = state.openness(ui.ctx());
+                let c = egui::pos2(x + 6.0, rect.center().y);
+                let color = if resp.hovered() { pal.heading } else { pal.text_muted };
+                // Шеврон: вправо — свёрнуто, вниз — открыто.
+                let a = std::f32::consts::FRAC_PI_2 * openness;
+                let rot = |dx: f32, dy: f32| egui::pos2(c.x + dx * a.cos() - dy * a.sin(), c.y + dx * a.sin() + dy * a.cos());
+                ui.painter().line(vec![rot(-2.0, -4.0), rot(2.0, 0.0), rot(-2.0, 4.0)], Stroke::new(1.4, color));
+                x += 16.0;
+            }
+            if let Some(icon) = icon {
+                let r = egui::Rect::from_center_size(egui::pos2(x + 7.0, rect.center().y), vec2(14.0, 14.0));
+                crate::icons::paint(ui.painter(), r, icon, pal.text_muted);
+                x += 20.0;
+            }
+            ui.painter().text(egui::pos2(x, rect.center().y), egui::Align2::LEFT_CENTER, title, FontId::new(13.0, crate::fonts::semibold()), pal.heading);
+            if collapsible {
+                if resp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                    state.toggle(ui);
+                }
+                state.store(ui.ctx());
+            }
+        }
+        let body = |ui: &mut Ui, d: &mut Self| {
+            ui.add_space(4.0);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = GAP;
+                d.children(ui, children, path);
+            });
+        };
+        if collapsible {
+            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), state_id, open);
+            state.show_body_unindented(ui, |ui| body(ui, self));
+        } else {
+            body(ui, self);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -402,7 +437,11 @@ mod tests {
             Element::Table { columns: vec!["Объект".into(), "Tris".into()], rows: vec![vec!["Фюзеляж".into(), "7 800".into()]] },
             Element::Progress { value: Some(0.4), text: String::new() },
             Element::Progress { value: None, text: "Считаю".into() },
-            Element::Group { title: "Свёрнуто".into(), icon: Some("book".into()), children: vec![ui::markdown("**да**"), ui::code("fn main() {}", "rust")], collapsible: true, open: false },
+            Element::Group { title: "Свёрнуто".into(), icon: Some("book".into()), children: vec![ui::markdown("**да**"), ui::code("fn main() {}", "rust")], collapsible: true, open: false, width: None },
+            ui::row([ui::card("Кадр 1", 200.0, [ui::label("Взлёт")]), ui::card("Кадр 2", 200.0, [ui::label("Набор высоты")])]),
+            Element::Canvas { width: 400.0, height: 120.0, shapes: vec![ui::rect(0.0, 0.0, 80.0, 40.0, "accent", 4.0), ui::text_at(4.0, 4.0, "Ноды", 13.0, "text")], pan_zoom: true, background: Some("panel".into()) },
+            Element::Compare { before: "a.png".into(), after: "b.png".into(), before_label: "До".into(), after_label: "После".into() },
+            Element::View3d { positions: vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0], indices: vec![0, 1, 2], color: None, height: 120.0, wireframe: true },
             ui::row([ui::button("more", "Ещё"), ui::command_button("Найти", "terms.find", Value::Null)]),
             Element::Badge { text: "preview".into(), tone: Tone::Muted },
             Element::Image { path: "a.png".into(), width: None, alt: "картинка".into() },

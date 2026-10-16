@@ -5,6 +5,7 @@
 pub use egui;
 
 pub mod appearance;
+mod canvas;
 pub mod elements;
 pub mod find_action;
 pub mod font_page;
@@ -16,4 +17,5 @@ pub mod selection;
 pub mod settings_window;
 pub mod theme;
 pub mod theme_tools;
+mod view3d;
 pub mod widgets;

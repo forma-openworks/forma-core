@@ -56,6 +56,9 @@ interface host {
     /// Текстовый файл хранилища или проекта: путь от корня, через `/`. Право `vault:read`.
     read-file: func(path: string) -> result<string, string>;
 
+    /// Двоичный файл хранилища или проекта (модели, картинки). Право `vault:read`.
+    read-bytes: func(path: string) -> result<list<u8>, string>;
+
     /// Что лежит в папке хранилища (`""` — корень). Право `vault:read`.
     list-dir: func(path: string) -> result<list<entry>, string>;
 

@@ -9,7 +9,7 @@
 //! `mods ctrl+shift` — держать клавиши-модификаторы (`mods` — отпустить);
 //! `key Escape` / `key ctrl+S` — нажать клавишу; `text абв` — ввести текст;
 //! `wait N` — пропустить N кадров; `leave` — указатель ушёл из окна; `drop <путь>` — бросить
-//! файл в окно.
+//! файл в окно; `wheel DX DY` — колесо мыши (в точках, с `mods ctrl` — масштаб).
 
 use std::collections::VecDeque;
 use std::io::{Read, Seek, SeekFrom};
@@ -142,6 +142,13 @@ impl Script {
                 }
             }
             "text" => input.events.push(Event::Text(args.join(" "))),
+            // Колесо мыши: `wheel 0 -300` — прокрутка вниз на 300 точек (с `mods ctrl` — масштаб).
+            "wheel" => input.events.push(Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(num(0).unwrap_or(0.0), num(1).unwrap_or(0.0)),
+                phase: egui::TouchPhase::Move,
+                modifiers: self.mods,
+            }),
             "wait" => self.wait = num(0).unwrap_or(1.0) as u32,
             "leave" => input.events.push(Event::PointerGone),
             "drop" => input.dropped_files.push(std::sync::Arc::new(TestFile(PathBuf::from(args.join(" "))))),

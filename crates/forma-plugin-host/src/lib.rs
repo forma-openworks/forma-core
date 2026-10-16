@@ -36,8 +36,10 @@ const TICK: Duration = Duration::from_millis(50);
 const CALL_TICKS: u64 = 40;
 /// Наибольшая память одного плагина.
 const MAX_MEMORY: usize = 256 << 20;
-/// Наибольший файл, который плагин может прочитать.
+/// Наибольший текстовый файл, который плагин может прочитать.
 const MAX_FILE: u64 = 16 << 20;
+/// Наибольший двоичный файл (модели бывают крупными, но память плагина — 256 МБ).
+const MAX_BYTES: u64 = 96 << 20;
 
 /// Уведомление от плагина или о плагине: программа показывает его внизу окна.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,6 +176,16 @@ impl forma::plugin::host::Host for State {
             return Err(format!("{path}: the file is larger than {} MB", MAX_FILE >> 20));
         }
         std::fs::read_to_string(&file).map_err(|e| format!("{path}: {e}"))
+    }
+
+    fn read_bytes(&mut self, path: String) -> Result<Vec<u8>, String> {
+        self.need("vault:read").or_else(|_| self.need("vault:write"))?;
+        let file = self.vault_path(&path)?;
+        let meta = std::fs::metadata(&file).map_err(|e| format!("{path}: {e}"))?;
+        if meta.len() > MAX_BYTES {
+            return Err(format!("{path}: the file is larger than {} MB", MAX_BYTES >> 20));
+        }
+        std::fs::read(&file).map_err(|e| format!("{path}: {e}"))
     }
 
     fn list_dir(&mut self, path: String) -> Result<Vec<Entry>, String> {
