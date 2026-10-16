@@ -310,6 +310,8 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         let ctx = &cc.egui_ctx;
         // Системной рамки у окна нет — шапку рисует программа (см. `caption`).
         crate::caption::round_corners(cc);
+        // Окна не вырастут больше текстуры видеокарты (см. `caption::guard_windows`).
+        crate::caption::remember_max_side(cc);
         crate::highlight::warm_up();
         // Список шрифтов системы нужен странице «Шрифты» и темам со своими шрифтами.
         forma_ui::fonts::warm_up();
@@ -438,6 +440,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
     /// Начало кадра: тема, шрифты, плагины, проверка раскладки.
     pub fn begin_frame(&mut self, ctx: &egui::Context) {
         crate::caption::finish_start(ctx);
+        crate::caption::guard_windows(ctx);
         self.apply_style(ctx);
         self.poll_plugins(ctx);
         self.poll_user_settings();

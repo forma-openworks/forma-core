@@ -278,3 +278,99 @@ fn work_area(pos: Option<egui::Pos2>) -> Option<egui::Rect> {
 fn work_area(_pos: Option<egui::Pos2>) -> Option<egui::Rect> {
     None
 }
+
+/// Самая длинная сторона окна в пикселях, какую вмещает текстура видеокарты; ноль — ещё
+/// неизвестно (см. [`guard_windows`]).
+#[cfg(windows)]
+static MAX_SIDE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// Сколько окон программы уже под защитой размера.
+#[cfg(windows)]
+static GUARDED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Номер нашего подкласса окна: подклассы ставят и другие библиотеки.
+#[cfg(windows)]
+const SIZE_GUARD: usize = 0x466F_726D;
+/// Свойство окна, которое помечает окно под защитой. GetWindowSubclass для этого не годится:
+/// системная comctl32 версии 5 отдаёт её только по номеру, и программа без манифеста
+/// comctl32 v6 с ней даже не запустится.
+#[cfg(windows)]
+const GUARD_PROP: windows_sys::core::PCWSTR = windows_sys::core::w!("FormaSizeGuard");
+
+/// Запоминает предел текстуры видеокарты для [`guard_windows`].
+#[cfg(windows)]
+pub(crate) fn remember_max_side(cc: &eframe::CreationContext<'_>) {
+    if let Some(rs) = &cc.wgpu_render_state {
+        MAX_SIDE.store(rs.device.limits().max_texture_dimension_2d, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn remember_max_side(_cc: &eframe::CreationContext<'_>) {}
+
+/// Не даёт окнам программы вырасти больше текстуры видеокарты. Вызывается каждый кадр, но
+/// окна перебирает, только когда у программы есть окно без защиты.
+///
+/// Поверхность окна — текстура размером с окно, у egui-wgpu не больше 8192 пикселей по
+/// стороне. Окно больше роняет программу в wgpu (`Surface::configure`). Мышью так растянуть
+/// окно можно разве что на несколько мониторов, а чужая программа через `SetWindowPos` задаёт
+/// любой размер. Windows такой размер не проверит: проверку по `WM_GETMINMAXINFO` делает
+/// DefWindowProc на `WM_WINDOWPOSCHANGING`, а winit отвечает на это сообщение сам. Поэтому
+/// каждому окну ставится подкласс, который урезает новый размер раньше, чем его увидит winit.
+#[cfg(windows)]
+pub(crate) fn guard_windows(ctx: &egui::Context) {
+    use std::sync::atomic::Ordering::Relaxed;
+    use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::EnumThreadWindows;
+    let max = MAX_SIDE.load(Relaxed);
+    if max == 0 || ctx.input(|i| i.raw.viewports.len()) <= GUARDED.load(Relaxed) {
+        return;
+    }
+    unsafe { EnumThreadWindows(GetCurrentThreadId(), Some(guard_window), max as isize) };
+}
+
+#[cfg(not(windows))]
+pub(crate) fn guard_windows(_ctx: &egui::Context) {}
+
+/// Ставит защиту размера окну, которое создал winit (окну egui), если её ещё нет.
+#[cfg(windows)]
+unsafe extern "system" fn guard_window(hwnd: windows_sys::Win32::Foundation::HWND, max: isize) -> windows_sys::core::BOOL {
+    use windows_sys::Win32::UI::Shell::SetWindowSubclass;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetPropW, SetPropW};
+    let mut class = [0u16; 32];
+    let len = unsafe { GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32) };
+    // Класс окон winit; диалоги и служебные окна потока не трогаем.
+    if String::from_utf16_lossy(&class[..len.max(0) as usize]) == "Window Class"
+        && unsafe { GetPropW(hwnd, GUARD_PROP) }.is_null()
+        && unsafe { SetWindowSubclass(hwnd, Some(limit_size), SIZE_GUARD, max as usize) } != 0
+    {
+        unsafe { SetPropW(hwnd, GUARD_PROP, std::ptr::without_provenance_mut(1)) };
+        GUARDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    1
+}
+
+/// Подкласс окна: новый размер не больше `max` по каждой стороне. У окна без рамки
+/// клиентская часть того же размера, что и само окно, у развёрнутого — меньше.
+#[cfg(windows)]
+unsafe extern "system" fn limit_size(hwnd: windows_sys::Win32::Foundation::HWND, msg: u32, wparam: usize, lparam: isize, id: usize, max: usize) -> isize {
+    use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{RemovePropW, SWP_NOSIZE, WINDOWPOS, WM_NCDESTROY, WM_WINDOWPOSCHANGING};
+    match msg {
+        WM_WINDOWPOSCHANGING => {
+            let pos = unsafe { &mut *(lparam as *mut WINDOWPOS) };
+            let max = max as i32;
+            if pos.flags & SWP_NOSIZE == 0 && (pos.cx > max || pos.cy > max) {
+                log::warn!("Window size {}x{} exceeds the GPU texture limit {max}, clamped", pos.cx, pos.cy);
+                pos.cx = pos.cx.min(max);
+                pos.cy = pos.cy.min(max);
+            }
+        }
+        // Подкласс снимают до того, как окно исчезнет (так велит документация Windows).
+        WM_NCDESTROY => {
+            unsafe { RemoveWindowSubclass(hwnd, Some(limit_size), id) };
+            unsafe { RemovePropW(hwnd, GUARD_PROP) };
+            GUARDED.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        _ => {}
+    }
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
