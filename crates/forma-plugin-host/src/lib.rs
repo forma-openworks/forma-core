@@ -419,6 +419,8 @@ pub struct Runtime {
     /// Растёт, когда меняется то, что плагины нарисовали бы иначе: набор плагинов, хранилище,
     /// язык, отключённый плагин. Программа по нему сбрасывает свои кеши блоков и панелей.
     generation: u64,
+    /// Сколько задач плагинов завершилось.
+    jobs_finished: u64,
 }
 
 impl Drop for Runtime {
@@ -474,6 +476,7 @@ impl Runtime {
             jobs: jobs::Shared::default(),
             waker: jobs::Waker::default(),
             generation: 0,
+            jobs_finished: 0,
         })
     }
 
@@ -503,6 +506,13 @@ impl Runtime {
         jobs::running(&self.jobs, plugin)
     }
 
+    /// Сколько задач плагинов завершилось с запуска. Программа, у которой есть файлы, по
+    /// нему перечитывает их с диска, как IDE от JetBrains после внешнего инструмента
+    /// («Synchronize files after execution»): программа плагина могла записать файлы.
+    pub fn jobs_finished(&self) -> u64 {
+        self.jobs_finished
+    }
+
     /// Отдать плагинам события их задач (строки вывода, завершение) — раз в кадр. `true` —
     /// что-то отдано.
     pub fn pump_jobs(&mut self) -> bool {
@@ -510,6 +520,7 @@ impl Runtime {
         if events.is_empty() {
             return false;
         }
+        self.jobs_finished += events.iter().filter(|(_, e)| matches!(e.kind, JobStream::Exit)).count() as u64;
         // По плагинам, в порядке событий.
         let mut by_plugin: Vec<(String, Vec<JobEvent>)> = Vec::new();
         for (plugin, e) in events {

@@ -21,3 +21,7 @@ forma-plugin-ui.workspace = true
 serde_json.workspace = true
 resvg = { version = "0.48.1", default-features = false }
 
+
+[dev-dependencies]
+# Шрифты egui в тестах: без них у текста нулевая ширина и раскладку не проверить.
+egui = { workspace = true, features = ["default_fonts"] }

@@ -6,6 +6,8 @@
 //! Что пользователь сделал с элементами, [`show`] возвращает списком [`Output`]: события
 //! для плагина и команды от кнопок.
 
+use std::collections::HashMap;
+
 use egui::{Color32, CornerRadius, CursorIcon, FontId, Frame, Id, Margin, RichText, Sense, Stroke, Ui, vec2};
 use forma_i18n::t;
 use forma_plugin_ui::{Element, Event, EventKind, Item, Size, Tone};
@@ -57,7 +59,7 @@ pub enum Output {
 /// Рисует дерево `root`. `id` — место, где элементы помнят своё состояние (текст поля,
 /// открыта ли группа): у одного блока или панели он должен быть постоянным.
 pub fn show(ui: &mut Ui, pal: &Palette, id: Id, root: &Element, hooks: &mut dyn Hooks) -> Vec<Output> {
-    let mut d = Draw { pal, hooks, base: id, out: Vec::new() };
+    let mut d = Draw { pal, hooks, base: id, out: Vec::new(), groups: HashMap::new() };
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
         d.element(ui, root, id);
@@ -73,6 +75,32 @@ struct Draw<'a> {
     hooks: &'a mut dyn Hooks,
     base: Id,
     out: Vec<Output>,
+    /// Сколько групп с таким заголовком уже нарисовано в этом кадре.
+    groups: HashMap<String, usize>,
+}
+
+/// Где группа с заголовком `title` (`n`-я с таким заголовком) помнит, свёрнута ли она. Не
+/// по месту в дереве, а по заголовку, как панели Blender по `bl_idname`: плагин добавил
+/// строку выше — свёрнутая группа остаётся свёрнутой.
+fn group_state(base: Id, title: &str, n: usize) -> Id {
+    base.with(("group", title, n))
+}
+
+/// Ширина текста одной строкой.
+fn text_width(ui: &Ui, text: &RichText) -> f32 {
+    egui::WidgetText::from(text.clone()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Body).size().x
+}
+
+/// Место для элемента строки шириной `want`: не влез в остаток строки — целиком уходит на
+/// следующую; текст переносится по словам, только если элемент шире всей строки (иначе
+/// egui переносит его по оставшейся ширине — вплоть до буквы в строке, а элементы в рамке
+/// ставит у курсора, и они вылезают за край). Остаток строки — `available_size_before_wrap`:
+/// `available_width` в строке с переносом — ширина всей строки.
+fn fit_row(ui: &mut Ui, want: f32) -> egui::TextWrapMode {
+    if want > ui.available_size_before_wrap().x && ui.cursor().min.x > ui.max_rect().min.x + 0.5 {
+        ui.end_row();
+    }
+    if want > ui.available_size_before_wrap().x { egui::TextWrapMode::Wrap } else { egui::TextWrapMode::Extend }
 }
 
 fn tone_color(pal: &Palette, tone: Tone) -> Color32 {
@@ -149,6 +177,7 @@ impl Draw<'_> {
                 let size = text_size(*size);
                 match icon {
                     Some(icon) => {
+                        fit_row(ui, size + 6.0 + text_width(ui, &RichText::new(text).size(size)));
                         crate::widgets::icon_label(ui, icon, text.clone(), size, color);
                     }
                     None => {
@@ -156,7 +185,8 @@ impl Draw<'_> {
                         if *bold {
                             rt = rt.family(crate::fonts::semibold());
                         }
-                        ui.add(egui::Label::new(rt).wrap());
+                        let wrap = fit_row(ui, text_width(ui, &rt));
+                        ui.add(egui::Label::new(rt).wrap_mode(wrap));
                     }
                 }
             }
@@ -177,15 +207,9 @@ impl Draw<'_> {
             Element::Badge { text, tone } => badge(ui, pal, text, *tone),
             Element::Button { id, text, icon, primary, enabled, tooltip, command, args } => {
                 let label = RichText::new(text).size(13.0);
-                // Кнопка не влезла в остаток строки — целиком уходит на следующую; подпись
-                // переносится по словам, только если кнопка шире всей строки (поэтому прямо в
-                // строку, без вложенного Ui, который занял бы её остаток).
-                let text_w = egui::WidgetText::from(label.clone()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button).size().x;
-                let want = text_w + 2.0 * ui.spacing().button_padding.x + if icon.is_some() && !primary { 14.0 + ui.spacing().icon_spacing } else { 0.0 };
-                if want > ui.available_width() && ui.cursor().min.x > ui.max_rect().min.x + 0.5 {
-                    ui.end_row();
-                }
-                let wrap = if want > ui.available_width() { egui::TextWrapMode::Wrap } else { egui::TextWrapMode::Extend };
+                // Прямо в строку, без вложенного Ui, который занял бы её остаток.
+                let want = text_width(ui, &label) + 2.0 * ui.spacing().button_padding.x + if icon.is_some() && !primary { 14.0 + ui.spacing().icon_spacing } else { 0.0 };
+                let wrap = fit_row(ui, want);
                 let button = match (primary, icon) {
                     (true, _) => egui::Button::new(label.color(pal.button_primary_text)).fill(pal.button_primary),
                     (false, Some(icon)) => egui::Button::image_and_text(crate::icons::image(ui.ctx(), icon, 14.0, pal.text_muted), label),
@@ -277,20 +301,25 @@ impl Draw<'_> {
     #[allow(clippy::too_many_arguments)]
     fn group(&mut self, ui: &mut Ui, title: &str, icon: Option<&str>, children: &[Element], collapsible: bool, open: bool, path: Id) {
         let pal = self.pal;
-        let state_id = path.with("group");
+        let state_id = if title.is_empty() {
+            path.with("group")
+        } else {
+            let n = self.groups.entry(title.to_owned()).or_default();
+            *n += 1;
+            group_state(self.base, title, *n)
+        };
         let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), state_id, open);
         Frame::new().fill(pal.settings_card).stroke(Stroke::new(1.0, pal.border)).corner_radius(CornerRadius::same(8)).inner_margin(Margin::same(10)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             // Внутри группы — всегда сверху вниз, даже если сама группа стоит в строке.
-            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| self.group_body(ui, title, icon, children, collapsible, open, path, &mut state));
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| self.group_body(ui, title, icon, children, collapsible, open, path, state_id, &mut state));
         });
     }
 
     /// Шапка и содержимое группы (уже внутри рамки).
     #[allow(clippy::too_many_arguments)]
-    fn group_body(&mut self, ui: &mut Ui, title: &str, icon: Option<&str>, children: &[Element], collapsible: bool, open: bool, path: Id, state: &mut egui::collapsing_header::CollapsingState) {
+    fn group_body(&mut self, ui: &mut Ui, title: &str, icon: Option<&str>, children: &[Element], collapsible: bool, open: bool, path: Id, state_id: Id, state: &mut egui::collapsing_header::CollapsingState) {
         let pal = self.pal;
-        let state_id = path.with("group");
         if !title.is_empty() || collapsible {
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 20.0), if collapsible { Sense::click() } else { Sense::hover() });
             let mut x = rect.left();
@@ -411,13 +440,16 @@ impl Draw<'_> {
 /// Небольшая плашка с текстом.
 fn badge(ui: &mut Ui, pal: &Palette, text: &str, tone: Tone) {
     let color = if tone == Tone::Normal { pal.text_muted } else { tone_color(pal, tone) };
+    let rt = RichText::new(text).size(11.5).color(color);
+    // Поля 6 + 6 и рамка 1 + 1.
+    let wrap = fit_row(ui, text_width(ui, &rt) + 14.0);
     Frame::new()
         .fill(pal.chip_bg)
         .stroke(Stroke::new(1.0, pal.chip_border))
         .corner_radius(CornerRadius::same(5))
         .inner_margin(Margin::symmetric(6, 1))
         .show(ui, |ui| {
-            ui.label(RichText::new(text).size(11.5).color(color));
+            ui.add(egui::Label::new(rt).wrap_mode(wrap));
         });
 }
 
@@ -454,6 +486,16 @@ mod tests {
             Element::Space { size: 0.0 },
             Element::Unknown,
         ]);
+        let (ctx, pal) = setup();
+        for _ in 0..2 {
+            let mut out = Vec::new();
+            let mut full = ctx.run_ui(egui::RawInput::default(), |ui| out = show(ui, &pal, Id::new("t"), &tree, &mut Plain));
+            full.textures_delta.clear();
+            assert!(out.is_empty(), "без действий пользователя — ни событий, ни команд");
+        }
+    }
+
+    fn setup() -> (egui::Context, Palette) {
         let ctx = egui::Context::default();
         // Начертания Forma — обычным шрифтом egui: здесь важна раскладка, а не вид букв.
         let mut fonts = egui::FontDefinitions::default();
@@ -463,11 +505,54 @@ mod tests {
         }
         ctx.set_fonts(fonts);
         let pal = crate::theme::Theme::resolve(crate::theme::ThemeFile::parse("[theme]\nid = \"t\"\ndark = true").unwrap()).pal;
+        (ctx, pal)
+    }
+
+    /// Прямоугольник, который дерево заняло в столбце шириной `width` (второй кадр — когда
+    /// шрифты уже готовы).
+    fn drawn(ctx: &egui::Context, pal: &Palette, id: &str, tree: &Element, width: f32) -> egui::Rect {
+        let mut rect = egui::Rect::NOTHING;
         for _ in 0..2 {
-            let mut out = Vec::new();
-            let mut full = ctx.run_ui(egui::RawInput::default(), |ui| out = show(ui, &pal, Id::new("t"), &tree, &mut Plain));
+            let mut full = ctx.run_ui(egui::RawInput::default(), |ui| {
+                rect = ui.allocate_ui(vec2(width, 4000.0), |ui| {
+                    ui.set_max_width(width);
+                    show(ui, pal, Id::new(id), tree, &mut Plain);
+                }).response.rect;
+            });
             full.textures_delta.clear();
-            assert!(out.is_empty(), "без действий пользователя — ни событий, ни команд");
         }
+        rect
+    }
+
+    /// Плашки и надписи строки в узкой панели уходят на следующую строку целиком, а не
+    /// сжимаются в столбик по букве; шире всей строки — переносятся по словам.
+    #[test]
+    fn row_items_wrap_whole() {
+        forma_i18n::init_with(&[], None);
+        let (ctx, pal) = setup();
+        let badge = |text: &str| Element::Badge { text: text.into(), tone: Tone::Success };
+        let tree = ui::row([badge("проверка: готово"), ui::label("попытка 3"), badge("предсказание: верно"), badge("разбор: Зачтено")]);
+        let r = drawn(&ctx, &pal, "row", &tree, 200.0);
+        assert!(r.width() <= 200.5, "строка не вылезает за край: {r:?}");
+        assert!(r.height() < 100.0, "по плашке в строке, а не по букве: {r:?}");
+        let long = ui::row([ui::label("x"), badge("очень длинная плашка, которая не влезет даже в целую строку панели")]);
+        let r = drawn(&ctx, &pal, "long", &long, 160.0);
+        assert!(r.width() <= 160.5 && r.height() < 100.0, "перенос по словам: {r:?}");
+    }
+
+    /// Свёрнутая группа остаётся свёрнутой, когда плагин добавил элемент выше.
+    #[test]
+    fn collapsed_group_survives_new_rows_above() {
+        forma_i18n::init_with(&[], None);
+        let (ctx, pal) = setup();
+        let group = Element::Group { title: "Итог".into(), icon: None, children: vec![Element::Space { size: 300.0 }], collapsible: true, open: true, width: None };
+        let before = ui::column([group.clone()]);
+        let after = ui::column([ui::label("Проверка закончилась"), group]);
+        assert!(drawn(&ctx, &pal, "open", &after, 300.0).height() > 300.0, "по умолчанию открыта");
+        let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(&ctx, group_state(Id::new("t"), "Итог", 1), true);
+        state.set_open(false);
+        state.store(&ctx);
+        assert!(drawn(&ctx, &pal, "t", &before, 300.0).height() < 100.0);
+        assert!(drawn(&ctx, &pal, "t", &after, 300.0).height() < 100.0, "строка выше не раскрыла группу");
     }
 }
