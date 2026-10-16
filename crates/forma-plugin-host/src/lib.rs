@@ -1,8 +1,8 @@
 //! Code плагинов Forma: компоненты WebAssembly (`wasm32-wasip2`) в песочнице wasmtime, как
 //! расширения редактора Zed. Плагин видит только API из `wit/forma-plugin.wit` и только то,
 //! что разрешено в `[permissions]` его манифеста: файлы хранилища (`vault:read`,
-//! `vault:write`), своё хранилище «ключ — значение» (`data`). Сети, переменных окружения и
-//! чужих файлов у него нет.
+//! `vault:write`), связанные папки (`linked:read`), своё хранилище «ключ — значение»
+//! (`data`), программы из `process`. Сети, переменных окружения и чужих файлов у него нет.
 //!
 //! Как это работает:
 //! - [`Runtime::sync`] берёт работающие плагины с `[code]` (итог проверки загрузчика) и
@@ -12,8 +12,15 @@
 //! - каждый вызов ограничен по времени (эпохи wasmtime) и по памяти: зависший или упавший
 //!   плагин отключается до перезапуска программы, а программа показывает почему
 //!   ([`Runtime::take_notices`]);
-//! - о чём плагин просит программу (открыть панель, ссылку), программа забирает через
-//!   [`Runtime::take_requests`] и делает сама.
+//! - о чём плагин просит программу (открыть панель, ссылку, отметить задачу в заметке),
+//!   программа забирает через [`Runtime::take_requests`] и делает сама;
+//! - программы, которые запускает плагин (API 1.2), работают в фоне ([`jobs`]); их вывод
+//!   плагин получает пачкой в начале кадра — [`Runtime::pump_jobs`].
+//!
+//! Плагины, собранные до API 1.2, загружаются по миру `plugin-base` (у них нет экспорта
+//! `job-events`); новые — по нему же, а `job-events` находится отдельно.
+
+mod jobs;
 
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -22,13 +29,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use forma_plugins::{Installed, Manifest, Permissions, Report};
-use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
+use wasmtime::component::{Component, HasSelf, Linker, ResourceTable, TypedFunc};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
-wasmtime::component::bindgen!({ path: "wit", world: "plugin" });
+wasmtime::component::bindgen!({ path: "wit", world: "plugin-base" });
 
-use forma::plugin::types::{Entry, Level};
+use forma::plugin::types::{Entry, JobEvent, Level};
+
+pub use forma::plugin::types::JobStream;
 
 /// Шаг часов песочницы: каждые 50 мс счётчик эпох растёт на один.
 const TICK: Duration = Duration::from_millis(50);
@@ -58,6 +67,12 @@ pub enum Request {
     RefreshPanel { plugin: String, panel: String },
     /// Открыть заметку или файл по цели ссылки (`цель#раздел`).
     OpenLink { plugin: String, target: String },
+    /// Отметить пункт практики заметки `note` (путь от корня) с жирным началом `title`.
+    ToggleTask { plugin: String, note: String, title: String },
+    /// Дописать markdown в конец заметки; нет её — создать.
+    AppendToNote { plugin: String, note: String, markdown: String },
+    /// Дописать markdown в конец раздела заметки с заголовком `heading`.
+    AppendToSection { plugin: String, note: String, heading: String, markdown: String },
 }
 
 /// Панель плагина (вклад `panels`).
@@ -94,6 +109,17 @@ pub struct Hover {
     pub markdown: String,
 }
 
+/// Путь без приставки `\\?\`, которую добавляет `canonicalize` на Windows: такой путь годится
+/// и людям, и как рабочая папка программы.
+fn plain(path: PathBuf) -> PathBuf {
+    let s = path.to_string_lossy();
+    match (s.strip_prefix(r"\\?\UNC\"), s.strip_prefix(r"\\?\")) {
+        (Some(unc), _) => PathBuf::from(format!(r"\\{unc}")),
+        (None, Some(local)) => PathBuf::from(local),
+        _ => path,
+    }
+}
+
 /// Что видит code одного плагина.
 struct State {
     wasi: WasiCtx,
@@ -108,6 +134,10 @@ struct State {
     requests: Arc<Mutex<Vec<Request>>>,
     /// Действующие значения настроек всех работающих плагинов (общие с [`Runtime`]).
     settings: Arc<Mutex<BTreeMap<String, serde_json::Value>>>,
+    /// Связанные папки хранилища: имя и полный путь (общие с [`Runtime`]).
+    linked: Arc<Mutex<Vec<(String, PathBuf)>>>,
+    jobs: jobs::Shared,
+    waker: jobs::Waker,
 }
 
 impl WasiView for State {
@@ -134,6 +164,45 @@ impl State {
             return Err(format!("path {rel:?} leaves the vault"));
         }
         Ok(root.join(rel))
+    }
+
+    /// Файл или папка для чтения: путь от корня хранилища (права `vault:read` или
+    /// `vault:write`), `linked:<имя>/…` или полный путь внутри хранилища или связанной папки
+    /// (для связанных — право `linked:read`).
+    fn readable(&self, path: &str) -> Result<PathBuf, String> {
+        let vault = || self.need("vault:read").or_else(|_| self.need("vault:write"));
+        if let Some(rest) = path.strip_prefix("linked:") {
+            self.need("linked:read")?;
+            let (name, rel) = rest.split_once('/').unwrap_or((rest, ""));
+            let root = self.linked.lock().ok().and_then(|l| l.iter().find(|(n, _)| n == name).map(|(_, r)| r.clone())).ok_or(format!("no linked folder {name:?}"))?;
+            if !Path::new(rel).components().all(|c| matches!(c, PathPart::Normal(_) | PathPart::CurDir)) {
+                return Err(format!("path {rel:?} leaves the linked folder"));
+            }
+            return Ok(root.join(rel));
+        }
+        let full = Path::new(path);
+        if !full.is_absolute() {
+            vault()?;
+            return self.vault_path(path);
+        }
+        let real = std::fs::canonicalize(full).map(plain).map_err(|e| format!("{path}: {e}"))?;
+        let inside = |root: &Path| std::fs::canonicalize(root).map(plain).is_ok_and(|r| real.starts_with(r));
+        if self.root.as_deref().is_some_and(inside) {
+            vault()?;
+            return Ok(real);
+        }
+        self.need("linked:read")?;
+        if self.linked.lock().is_ok_and(|l| l.iter().any(|(_, r)| inside(r))) {
+            return Ok(real);
+        }
+        Err(format!("{path}: outside the vault and its linked folders"))
+    }
+
+    /// Заметка для правки: путь от корня хранилища, право `vault:write`.
+    fn note(&self, note: &str) -> Result<String, String> {
+        self.need("vault:write")?;
+        self.vault_path(note)?;
+        Ok(note.trim_start_matches(['/', '\\']).replace('\\', "/"))
     }
 
     fn request(&self, r: Request) {
@@ -171,8 +240,7 @@ impl forma::plugin::host::Host for State {
     }
 
     fn read_file(&mut self, path: String) -> Result<String, String> {
-        self.need("vault:read").or_else(|_| self.need("vault:write"))?;
-        let file = self.vault_path(&path)?;
+        let file = self.readable(&path)?;
         let meta = std::fs::metadata(&file).map_err(|e| format!("{path}: {e}"))?;
         if meta.len() > MAX_FILE {
             return Err(format!("{path}: the file is larger than {} MB", MAX_FILE >> 20));
@@ -181,8 +249,7 @@ impl forma::plugin::host::Host for State {
     }
 
     fn read_bytes(&mut self, path: String) -> Result<Vec<u8>, String> {
-        self.need("vault:read").or_else(|_| self.need("vault:write"))?;
-        let file = self.vault_path(&path)?;
+        let file = self.readable(&path)?;
         let meta = std::fs::metadata(&file).map_err(|e| format!("{path}: {e}"))?;
         if meta.len() > MAX_BYTES {
             return Err(format!("{path}: the file is larger than {} MB", MAX_BYTES >> 20));
@@ -191,8 +258,7 @@ impl forma::plugin::host::Host for State {
     }
 
     fn list_dir(&mut self, path: String) -> Result<Vec<Entry>, String> {
-        self.need("vault:read").or_else(|_| self.need("vault:write"))?;
-        let dir = self.vault_path(&path)?;
+        let dir = self.readable(&path)?;
         let mut out: Vec<Entry> = std::fs::read_dir(&dir)
             .map_err(|e| format!("{path}: {e}"))?
             .flatten()
@@ -246,6 +312,55 @@ impl forma::plugin::host::Host for State {
         }
         self.settings.lock().ok()?.get(&key).map(|v| v.to_string())
     }
+
+    fn spawn(&mut self, program: String, args: Vec<String>, cwd: String) -> Result<u32, String> {
+        let exe = jobs::resolve_program(&program, &self.permissions.process)?;
+        let dir = match cwd.trim() {
+            "" => self.root.clone().ok_or("no vault or project is open")?,
+            c => {
+                let d = self.readable(c)?;
+                if !d.is_dir() {
+                    return Err(format!("{c}: not a folder"));
+                }
+                d
+            }
+        };
+        log::info!("plugin {}: runs {} {args:?} in {}", self.plugin, exe.display(), dir.display());
+        jobs::spawn(&self.jobs, &self.waker, &self.plugin, &exe, &args, &dir)
+    }
+
+    fn cancel(&mut self, job: u32) {
+        jobs::cancel(&self.jobs, &self.plugin, job);
+    }
+
+    fn write_stdin(&mut self, job: u32, text: String) -> Result<(), String> {
+        jobs::write_stdin(&self.jobs, &self.plugin, job, &text)
+    }
+
+    fn toggle_task(&mut self, note: String, title: String) -> Result<(), String> {
+        let note = self.note(&note)?;
+        self.request(Request::ToggleTask { plugin: self.plugin.clone(), note, title });
+        Ok(())
+    }
+
+    fn append_to_note(&mut self, note: String, markdown: String) -> Result<(), String> {
+        let note = self.note(&note)?;
+        self.request(Request::AppendToNote { plugin: self.plugin.clone(), note, markdown });
+        Ok(())
+    }
+
+    fn append_to_section(&mut self, note: String, heading: String, markdown: String) -> Result<(), String> {
+        let note = self.note(&note)?;
+        self.request(Request::AppendToSection { plugin: self.plugin.clone(), note, heading, markdown });
+        Ok(())
+    }
+
+    fn linked_dirs(&mut self) -> Vec<String> {
+        if self.need("linked:read").is_err() {
+            return Vec::new();
+        }
+        self.linked.lock().map(|l| l.iter().map(|(_, p)| p.to_string_lossy().into_owned()).collect()).unwrap_or_default()
+    }
 }
 
 /// Скомпилированный модуль плагина (компиляция идёт в фоне).
@@ -258,7 +373,9 @@ enum Compiled {
 /// Работающий экземпляр плагина.
 struct Live {
     store: Store<State>,
-    bindings: Plugin,
+    bindings: PluginBase,
+    /// Экспорт `job-events` (API 1.2); у плагинов до 1.2 его нет.
+    job_events: Option<TypedFunc<(Vec<JobEvent>,), ()>>,
 }
 
 /// Плагин с code.
@@ -296,9 +413,19 @@ pub struct Runtime {
     notices: Arc<Mutex<Vec<Notice>>>,
     requests: Arc<Mutex<Vec<Request>>>,
     settings: Arc<Mutex<BTreeMap<String, serde_json::Value>>>,
+    linked: Arc<Mutex<Vec<(String, PathBuf)>>>,
+    jobs: jobs::Shared,
+    waker: jobs::Waker,
     /// Растёт, когда меняется то, что плагины нарисовали бы иначе: набор плагинов, хранилище,
     /// язык, отключённый плагин. Программа по нему сбрасывает свои кеши блоков и панелей.
     generation: u64,
+}
+
+impl Drop for Runtime {
+    /// Программа закрывается: ни одной задачи плагинов не остаётся.
+    fn drop(&mut self) {
+        jobs::kill(&self.jobs, None);
+    }
 }
 
 /// Движок wasmtime — один на программу, с часами для ограничения времени вызовов.
@@ -331,7 +458,7 @@ impl Runtime {
         let engine = engine()?;
         let mut linker = Linker::new(&engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker).map_err(|e| e.to_string())?;
-        Plugin::add_to_linker::<State, HasSelf<State>>(&mut linker, |s| s).map_err(|e| e.to_string())?;
+        PluginBase::add_to_linker::<State, HasSelf<State>>(&mut linker, |s| s).map_err(|e| e.to_string())?;
         Ok(Self {
             engine,
             linker,
@@ -343,8 +470,68 @@ impl Runtime {
             notices: Arc::default(),
             requests: Arc::default(),
             settings: Arc::default(),
+            linked: Arc::default(),
+            jobs: jobs::Shared::default(),
+            waker: jobs::Waker::default(),
             generation: 0,
         })
+    }
+
+    /// Как разбудить кадр программы, когда у задач плагинов появился вывод (у оболочки —
+    /// `request_repaint`): без этого в простаивающем окне вывод ждал бы движения мыши.
+    pub fn set_waker(&mut self, wake: impl Fn() + Send + Sync + 'static) {
+        if let Ok(mut w) = self.waker.lock() {
+            *w = Some(Arc::new(wake));
+        }
+    }
+
+    /// Связанные папки открытого хранилища (имя → полный путь): их плагины с правом
+    /// `linked:read` читают и запускают в них программы.
+    pub fn set_linked(&mut self, dirs: Vec<(String, PathBuf)>) {
+        if let Ok(mut l) = self.linked.lock() {
+            *l = dirs;
+        }
+    }
+
+    /// Связанные папки, которые знает программа.
+    pub fn linked(&self) -> Vec<(String, PathBuf)> {
+        self.linked.lock().map(|l| l.clone()).unwrap_or_default()
+    }
+
+    /// Сколько задач плагина ещё работает.
+    pub fn jobs_running(&self, plugin: &str) -> usize {
+        jobs::running(&self.jobs, plugin)
+    }
+
+    /// Отдать плагинам события их задач (строки вывода, завершение) — раз в кадр. `true` —
+    /// что-то отдано.
+    pub fn pump_jobs(&mut self) -> bool {
+        let events = jobs::take_events(&self.jobs);
+        if events.is_empty() {
+            return false;
+        }
+        // По плагинам, в порядке событий.
+        let mut by_plugin: Vec<(String, Vec<JobEvent>)> = Vec::new();
+        for (plugin, e) in events {
+            match by_plugin.iter_mut().find(|(p, _)| *p == plugin) {
+                Some((_, list)) => list.push(e),
+                None => by_plugin.push((plugin, vec![e])),
+            }
+        }
+        for (plugin, events) in by_plugin {
+            let Some(i) = self.slot_of(&plugin) else { continue };
+            let Some(f) = self.slots[i].live.as_ref().and_then(|l| l.job_events) else { continue };
+            self.call(i, |_, s| f.call(s, (events,)));
+        }
+        true
+    }
+
+    /// Остановить задачи экземпляров, которые сейчас пересоздаются (`None` — всех).
+    fn drop_live(&mut self, plugin: Option<&str>) {
+        jobs::kill(&self.jobs, plugin);
+        for s in self.slots.iter_mut().filter(|s| plugin.is_none_or(|p| s.id() == p)) {
+            s.live = None;
+        }
     }
 
     /// Поколение плагинов: растёт, когда старые ответы плагинов (блоки, панели) больше не
@@ -357,9 +544,7 @@ impl Runtime {
     pub fn set_language(&mut self, language: &str) {
         if self.language != language {
             self.language = language.to_owned();
-            for s in &mut self.slots {
-                s.live = None;
-            }
+            self.drop_live(None);
             self.generation += 1;
         }
     }
@@ -379,9 +564,7 @@ impl Runtime {
     pub fn set_root(&mut self, root: Option<&Path>) {
         if self.root.as_deref() != root {
             self.root = root.map(Path::to_path_buf);
-            for s in &mut self.slots {
-                s.live = None;
-            }
+            self.drop_live(None);
             self.generation += 1;
         }
     }
@@ -389,7 +572,7 @@ impl Runtime {
     /// Плагины с code из работающих (в порядке подключения). Новые и изменённые модули
     /// компилируются в фоне; плагинов, которых больше нет, не становится. Вызывать можно
     /// каждый кадр: если плагины те же, ничего не происходит. `force` — ещё и проверить, не
-    /// пересобрали ли модули (папки разработчика, кнопка «Обновить»).
+    /// пересобрали ли модули (папки разработчика, кнопка «Обновить»), и поднять упавшие.
     pub fn sync(&mut self, plugins: &[Installed], report: &Report, force: bool) {
         let wanted: Vec<&Installed> = report.order.iter().filter_map(|id| plugins.iter().find(|p| p.id() == id && !p.dev).or_else(|| plugins.iter().find(|p| p.id() == id))).filter(|p| p.manifest.code.is_some()).collect();
         let same = wanted.len() == self.slots.len() && wanted.iter().zip(&self.slots).all(|(p, s)| s.dir == p.dir && s.manifest == p.manifest);
@@ -400,7 +583,8 @@ impl Runtime {
         for p in wanted {
             let wasm = p.manifest.code.as_ref().map(|c| p.dir.join(&c.wasm));
             let stamp = wasm.as_ref().and_then(|w| std::fs::metadata(w).ok()?.modified().ok());
-            let keep = self.slots.iter().position(|s| s.id() == p.id() && s.dir == p.dir && s.manifest == p.manifest && s.stamp == stamp);
+            // «Обновить» (`force`) поднимает и упавший плагин: его слот создаётся заново.
+            let keep = self.slots.iter().position(|s| s.id() == p.id() && s.dir == p.dir && s.manifest == p.manifest && s.stamp == stamp && !(force && s.failed.is_some()));
             match keep {
                 Some(i) => slots.push(self.slots.swap_remove(i)),
                 None => {
@@ -410,7 +594,10 @@ impl Runtime {
                 }
             }
         }
-        self.slots = slots;
+        // Слоты, которых больше нет (плагин убран, выключен, пересобран), — без задач.
+        for gone in std::mem::replace(&mut self.slots, slots) {
+            jobs::kill(&self.jobs, Some(gone.id()));
+        }
         self.generation += 1;
     }
 
@@ -538,21 +725,32 @@ impl Runtime {
             notices: self.notices.clone(),
             requests: self.requests.clone(),
             settings: self.settings.clone(),
+            linked: self.linked.clone(),
+            jobs: self.jobs.clone(),
+            waker: self.waker.clone(),
         };
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limits);
         store.set_epoch_deadline(CALL_TICKS);
         let context = serde_json::json!({ "app": self.app, "language": self.language, "root": self.root.is_some() }).to_string();
-        let started = Plugin::instantiate(&mut store, &component, &self.linker).map_err(|e| format!("{e:#}")).and_then(|bindings| {
-            match bindings.call_activate(&mut store, &context) {
-                Ok(Ok(())) => Ok(bindings),
+        let started = self
+            .linker
+            .instantiate(&mut store, &component)
+            .and_then(|instance| {
+                let bindings = PluginBase::new(&mut store, &instance)?;
+                // API 1.2: события задач. У плагинов до 1.2 этого экспорта нет — и не надо.
+                let job_events = instance.get_typed_func::<(Vec<JobEvent>,), ()>(&mut store, "job-events").ok();
+                Ok((bindings, job_events))
+            })
+            .map_err(|e| format!("{e:#}"))
+            .and_then(|(bindings, job_events)| match bindings.call_activate(&mut store, &context) {
+                Ok(Ok(())) => Ok((bindings, job_events)),
                 Ok(Err(e)) => Err(e),
                 Err(trap) => Err(format!("{trap:#}")),
-            }
-        });
+            });
         match started {
-            Ok(bindings) => {
-                self.slots[i].live = Some(Live { store, bindings });
+            Ok((bindings, job_events)) => {
+                self.slots[i].live = Some(Live { store, bindings, job_events });
                 true
             }
             Err(e) => {
@@ -566,6 +764,7 @@ impl Runtime {
     fn disable(&mut self, i: usize, reason: String) {
         let slot = &mut self.slots[i];
         log::warn!("Plugin {} is disabled: {reason}", slot.id());
+        jobs::kill(&self.jobs, Some(slot.id()));
         slot.live = None;
         if let Ok(mut n) = self.notices.lock() {
             n.push(Notice { plugin: slot.id().to_owned(), text: reason.clone(), error: true });
@@ -576,7 +775,7 @@ impl Runtime {
 
     /// Вызов в экземпляр плагина `i` с ограничением времени. Ловушка или зависание
     /// отключают плагин.
-    fn call<R>(&mut self, i: usize, f: impl FnOnce(&Plugin, &mut Store<State>) -> wasmtime::Result<R>) -> Option<R> {
+    fn call<R>(&mut self, i: usize, f: impl FnOnce(&PluginBase, &mut Store<State>) -> wasmtime::Result<R>) -> Option<R> {
         if !self.ensure_live(i) {
             return None;
         }

@@ -101,6 +101,7 @@ pub fn asks(p: &Permissions) -> Vec<String> {
             "vault:read" => t!("plugin-perm-vault-read"),
             "vault:write" => t!("plugin-perm-vault-write"),
             "data" => t!("plugin-perm-data"),
+            "linked:read" => t!("plugin-perm-linked-read"),
             other => t!("plugin-perm-other", what = other.to_owned()),
         });
     }

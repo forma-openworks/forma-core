@@ -46,7 +46,7 @@ pub use forma_plugin_ui as ui;
 
 /// Что программа даёт плагину.
 pub use bindings::forma::plugin::host;
-pub use bindings::forma::plugin::types::{Entry, HoverRequest, HoverResult, Level};
+pub use bindings::forma::plugin::types::{Entry, HoverRequest, HoverResult, JobEvent, JobStream, Level};
 
 /// С чем плагин запущен (`activate`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -135,6 +135,11 @@ pub trait Plugin: 'static {
     /// Событие элемента панели. После него программа рисует панель заново
     /// ([`Plugin::render_panel`]).
     fn panel_event(&mut self, _panel: &str, _event: &ui::Event) {}
+
+    /// Событие задачи, запущенной [`host::spawn`] (API 1.2): строка вывода (`JobStream::Stdout`,
+    /// `Stderr`) или завершение (`Exit`, код — в `code`). Приходят по порядку, пачкой в начале
+    /// кадра программы; показать новое — [`host::refresh_panel`].
+    fn job_event(&mut self, _event: &JobEvent) {}
 }
 
 /// Запись в журнал программы.
@@ -236,6 +241,10 @@ macro_rules! register_plugin {
 
             fn render_panel(panel: String, context: String) -> Result<String, String> {
                 $crate::rt::panel(&panel, None, &context)
+            }
+
+            fn job_events(events: Vec<$crate::JobEvent>) {
+                $crate::rt::with(|p| events.iter().for_each(|e| p.job_event(e)));
             }
 
             fn panel_event(panel: String, event: String, context: String) -> Result<String, String> {

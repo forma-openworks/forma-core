@@ -1,11 +1,11 @@
-/// API плагинов Forma, версия 1.1: что программа даёт code плагина (host) и что code плагина
+/// API плагинов Forma, версия 1.2: что программа даёт code плагина (host) и что code плагина
 /// умеет сам (экспорты мира `plugin`). Плагин — компонент WebAssembly (`wasm32-wasip2`),
 /// работает в песочнице и видит только то, что разрешено в `[permissions]` его манифеста.
 ///
 /// Тексты сложной формы (контекст, дерево элементов, события) передаются JSON-строками: так
 /// их можно расширять без новой версии API, а SDK `forma-plugin-api` даёт к ним типы. Дерево
 /// элементов описано в crate `forma-plugin-ui`.
-package forma:plugin@1.1.0;
+package forma:plugin@1.2.0;
 
 /// Общие типы.
 interface types {
@@ -39,6 +39,25 @@ interface types {
         start: u32,
         end: u32,
         markdown: string,
+    }
+
+    /// Что случилось с запущенной программой (с версии 1.2).
+    enum job-stream {
+        /// Строка её вывода.
+        stdout,
+        /// Строка вывода ошибок.
+        stderr,
+        /// Программа завершилась (или её остановили): код — в `code`.
+        exit,
+    }
+
+    /// Событие задачи `job`: строка вывода целиком (без перевода строки, сколь угодно
+    /// длинная, UTF-8 с заменой битых байтов) или завершение.
+    record job-event {
+        job: u32,
+        kind: job-stream,
+        text: string,
+        code: option<s32>,
     }
 }
 
@@ -83,9 +102,39 @@ interface host {
     /// если оно там есть и подходит схеме из манифеста, иначе значение по умолчанию. Только
     /// свои ключи (`<id плагина>.…`); чужой или незнакомый — ничего.
     setting: func(key: string) -> option<string>;
+
+    /// Запустить программу (с версии 1.2): только из `[permissions] process` — по имени
+    /// (`learn`) или полным путём к файлу с этим именем (`…/blender.exe`). `cwd` — папка
+    /// хранилища (`""` — корень) или связанная папка (право `linked:read`). Программа
+    /// работает в фоне, её вывод приходит строками в `job-events`. Возвращает номер задачи.
+    spawn: func(program: string, args: list<string>, cwd: string) -> result<u32, string>;
+
+    /// Остановить свою задачу вместе со всеми программами, которые она запустила.
+    cancel: func(job: u32);
+
+    /// Передать текст на вход своей задачи.
+    write-stdin: func(job: u32, text: string) -> result<_, string>;
+
+    /// Отметить пункт раздела «Практика» заметки по жирному началу пункта
+    /// (`- [ ] **Свой package.** …`); уже отмеченный остаётся как был. Правку делает
+    /// программа (несохранённые правки открытой заметки не теряются). Право `vault:write`.
+    toggle-task: func(note: string, title: string) -> result<_, string>;
+
+    /// Дописать markdown в конец заметки; нет заметки — создать её (и папки). Право
+    /// `vault:write`.
+    append-to-note: func(note: string, markdown: string) -> result<_, string>;
+
+    /// Дописать markdown в конец раздела заметки с этим заголовком. Право `vault:write`.
+    append-to-section: func(note: string, heading: string, markdown: string) -> result<_, string>;
+
+    /// Связанные папки хранилища полными путями (практика курса, связанные курсы). Право
+    /// `linked:read`; без него — пусто. Внутри них работают `read-file`, `read-bytes`,
+    /// `list-dir` (полный путь или `linked:<имя>/…`) и `cwd` у `spawn`.
+    linked-dirs: func() -> list<string>;
 }
 
-world plugin {
+/// Плагин API 1.0–1.1: по этому миру программа загружает и плагины, собранные до 1.2.
+world plugin-base {
     import host;
     use types.{hover-request, hover-result};
 
@@ -113,4 +162,14 @@ world plugin {
 
     /// Событие элемента панели (JSON: `id`, `kind`, `value`) → новое дерево панели.
     export panel-event: func(panel: string, event: string, context: string) -> result<string, string>;
+}
+
+/// Плагин API 1.2: всё, что у `plugin-base`, и события своих задач.
+world plugin {
+    include plugin-base;
+    use types.{job-event};
+
+    /// События задач, запущенных `spawn` (строки вывода, завершение), — пачкой, в начале
+    /// кадра программы. Обновить панель — `refresh-panel`.
+    export job-events: func(events: list<job-event>);
 }

@@ -164,6 +164,7 @@ plugin-perm-process = запускать программы: { $list }
 plugin-perm-vault-read = читать файлы хранилища или проекта
 plugin-perm-vault-write = изменять файлы хранилища или проекта
 plugin-perm-data = хранить свои данные
+plugin-perm-linked-read = читать связанные папки хранилища (практику курса, связанные курсы) и запускать в них программы
 plugin-perm-other = { $what }
 dialog-plugin-folder = Папка плагина
 unit-mb = МБ

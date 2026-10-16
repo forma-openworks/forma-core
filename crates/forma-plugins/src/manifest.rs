@@ -43,7 +43,7 @@ pub const LEGACY_MANIFEST: &str = "plugin.toml";
 
 /// Версия API плагинов, которую понимает эта платформа.
 pub fn api_version() -> semver::Version {
-    semver::Version::new(1, 1, 0)
+    semver::Version::new(1, 2, 0)
 }
 
 /// Вид плагина — категория на странице «Плагины». В новом манифесте её можно не писать:
@@ -128,7 +128,8 @@ pub struct Permissions {
     /// Какие программы можно запускать (`claude`, `blender`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub process: Vec<String>,
-    /// Доступ к файлам: `vault:read`, `vault:write` (хранилище или проект), `data` (своя папка).
+    /// Доступ к файлам: `vault:read`, `vault:write` (хранилище или проект), `linked:read`
+    /// (связанные папки хранилища: практика курса, связанные курсы), `data` (своя папка).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
 }

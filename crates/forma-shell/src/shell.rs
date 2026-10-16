@@ -327,6 +327,9 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
             Ok(mut rt) => {
                 rt.set_language(&settings.appearance.effective_language());
                 rt.sync(plugins.installed(), &plugin_report, false);
+                // Вывод программ, запущенных плагинами, будит окно, даже если оно простаивает.
+                let waker = ctx.clone();
+                rt.set_waker(move || waker.request_repaint());
                 Some(rt)
             }
             Err(e) => {
@@ -795,6 +798,8 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
                 rt.set_settings(values);
                 self.runtime_settings = Some(settings_key);
             }
+            // События задач плагинов (вывод программ, завершение) — раз в кадр.
+            rt.pump_jobs();
             notices = rt.take_notices();
             commands = Some(rt.commands());
         }

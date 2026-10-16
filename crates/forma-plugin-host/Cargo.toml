@@ -12,3 +12,8 @@ serde.workspace = true
 serde_json.workspace = true
 wasmtime = { version = "49.0.3", default-features = false, features = ["component-model", "cranelift", "runtime", "std", "parallel-compilation"] }
 wasmtime-wasi = { version = "49.0.3", default-features = false, features = ["p2"] }
+
+# Задачи плагинов на Windows — в Job Object (остановка убивает всё дерево процессов); вывод
+# старых консольных программ — из кодировки консоли.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }

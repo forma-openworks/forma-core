@@ -163,6 +163,7 @@ plugin-brings-code = code (WebAssembly, sandboxed)
 plugin-perm-process = run programs: { $list }
 plugin-perm-vault-read = read files of the vault or project
 plugin-perm-vault-write = change files of the vault or project
+plugin-perm-linked-read = read the vault's linked folders (course practice, related courses) and run programs in them
 plugin-perm-data = keep its own data
 plugin-perm-other = { $what }
 dialog-plugin-folder = Plugin folder

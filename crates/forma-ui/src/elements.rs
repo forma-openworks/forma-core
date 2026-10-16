@@ -176,17 +176,22 @@ impl Draw<'_> {
             }
             Element::Badge { text, tone } => badge(ui, pal, text, *tone),
             Element::Button { id, text, icon, primary, enabled, tooltip, command, args } => {
-                let resp = ui
-                    .add_enabled_ui(*enabled, |ui| {
-                        let label = RichText::new(text).size(13.0);
-                        let button = match (primary, icon) {
-                            (true, _) => egui::Button::new(label.color(pal.button_primary_text)).fill(pal.button_primary),
-                            (false, Some(icon)) => egui::Button::image_and_text(crate::icons::image(ui.ctx(), icon, 14.0, pal.text_muted), label),
-                            (false, None) => egui::Button::new(label),
-                        };
-                        ui.add(button.min_size(vec2(0.0, 28.0)))
-                    })
-                    .inner;
+                let label = RichText::new(text).size(13.0);
+                // Кнопка не влезла в остаток строки — целиком уходит на следующую; подпись
+                // переносится по словам, только если кнопка шире всей строки (поэтому прямо в
+                // строку, без вложенного Ui, который занял бы её остаток).
+                let text_w = egui::WidgetText::from(label.clone()).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button).size().x;
+                let want = text_w + 2.0 * ui.spacing().button_padding.x + if icon.is_some() && !primary { 14.0 + ui.spacing().icon_spacing } else { 0.0 };
+                if want > ui.available_width() && ui.cursor().min.x > ui.max_rect().min.x + 0.5 {
+                    ui.end_row();
+                }
+                let wrap = if want > ui.available_width() { egui::TextWrapMode::Wrap } else { egui::TextWrapMode::Extend };
+                let button = match (primary, icon) {
+                    (true, _) => egui::Button::new(label.color(pal.button_primary_text)).fill(pal.button_primary),
+                    (false, Some(icon)) => egui::Button::image_and_text(crate::icons::image(ui.ctx(), icon, 14.0, pal.text_muted), label),
+                    (false, None) => egui::Button::new(label),
+                };
+                let resp = ui.add_enabled(*enabled, button.min_size(vec2(0.0, 28.0)).wrap_mode(wrap));
                 let resp = if tooltip.is_empty() { resp } else { resp.on_hover_text(tooltip) };
                 if resp.clicked() {
                     match command {
