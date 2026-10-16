@@ -34,7 +34,7 @@ Apps built on Forma Core:
 
 | Crate | What it does |
 |---|---|
-| `forma-shell` | The app shell: window frame, menus, workspaces, status bar, welcome screen, settings, Find Action, plugins and themes. An app describes itself with a `Spec` and starts with `forma_shell::run` |
+| `forma-shell` | The app shell: window frame, menus, workspaces, status bar, welcome screen, settings, Find Action, plugins and themes, plugin panels and command contexts shared by all apps (`plugin_panels`). An app describes itself with a `Spec` and starts with `forma_shell::run` |
 | `forma-layout` | The composable UI: area tree with one editor per area, editor-type menu, corner gestures, separate OS windows |
 | `forma-ui` | The theme engine, icons, fonts, widgets, the settings window and its pages, theme tools. Ships the Mycelium Dark and Light themes (`forma_ui::theme::MYCELIUM_THEMES`) |
 | `forma-actions` | Actions and the keymap |
@@ -99,7 +99,7 @@ Forma Core — ядро, на котором построены программ
 
 | Крейт | Что делает |
 |---|---|
-| `forma-shell` | Оболочка программы: рамка окна, меню, рабочие пространства, строка состояния, экран приветствия, настройки, «Найти действие», плагины и темы. Программа описывает себя в `Spec` и запускается через `forma_shell::run` |
+| `forma-shell` | Оболочка программы: рамка окна, меню, рабочие пространства, строка состояния, экран приветствия, настройки, «Найти действие», плагины и темы, общие для всех программ панели плагинов и контекст их команд (`plugin_panels`). Программа описывает себя в `Spec` и запускается через `forma_shell::run` |
 | `forma-layout` | Составной интерфейс: дерево областей с одним редактором в каждой, меню вида редактора, жесты за уголки, отдельные окна ОС |
 | `forma-ui` | Движок тем, значки, шрифты, виджеты, окно настроек и его страницы, инструменты для тем. Везёт темы Mycelium Dark и Light (`forma_ui::theme::MYCELIUM_THEMES`) |
 | `forma-actions` | Действия и раскладка клавиш |

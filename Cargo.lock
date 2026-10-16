@@ -1825,6 +1825,7 @@ dependencies = [
  "forma-i18n",
  "forma-layout",
  "forma-plugin-host",
+ "forma-plugin-ui",
  "forma-plugins",
  "forma-settings",
  "forma-ui",
