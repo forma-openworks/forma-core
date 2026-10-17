@@ -27,8 +27,10 @@
 //! Интерфейс (блоки заметок, панели) плагин описывает деревом элементов из модуля [`ui`]:
 //! `ui::column([ui::heading("…"), ui::button("id", "…")])`. Рисует его программа.
 
-/// Привязки к миру WIT `forma:plugin/plugin` (сгенерированы wit-bindgen).
+/// Привязки к миру WIT `forma:plugin/plugin` (сгенерированы wit-bindgen). У `block-event`
+/// четыре строки — в сгенерированной обёртке это восемь аргументов.
 #[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
 pub mod bindings {
     wit_bindgen::generate!({
         path: "../forma-plugin-host/wit",
@@ -101,6 +103,22 @@ impl PanelContext {
     }
 }
 
+/// С чем рисуется блок заметки (`context` у `render-block` и `block-event`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BlockContext {
+    /// Заметка (путь от корня хранилища через `/`).
+    pub note: String,
+    /// Тёмная ли тема.
+    pub dark: bool,
+}
+
+impl BlockContext {
+    pub fn from_json(json: &str) -> Self {
+        serde_json::from_str(json).unwrap_or_default()
+    }
+}
+
 /// Плагин: создаётся при первом вызове (`activate`) и живёт, пока работает программа.
 /// Всё, кроме [`Plugin::new`], необязательно: плагин отвечает только на то, что объявил в
 /// манифесте.
@@ -121,6 +139,11 @@ pub trait Plugin: 'static {
     fn render_block(&mut self, lang: &str, _source: &str, _context: &str) -> Result<ui::Element, String> {
         Err(format!("this plugin has no block {lang:?}"))
     }
+
+    /// Событие элемента блока (API 1.3): что человек сделал в блоке ` ```lang ` с текстом
+    /// `source`. После него программа берёт новое дерево блока — по умолчанию оно рисуется
+    /// заново ([`Plugin::render_block`]), так что обычно достаточно запомнить событие.
+    fn block_event(&mut self, _lang: &str, _source: &str, _event: &ui::Event, _cx: &BlockContext) {}
 
     /// Команда `id` из манифеста; ответ — JSON (или пустая строка).
     fn command(&mut self, id: &str, _cx: &CommandContext) -> Result<String, String> {
@@ -198,6 +221,16 @@ pub mod rt {
         PLUGIN.with(|p| p.borrow_mut().as_mut().map(|p| f(p.as_mut())))
     }
 
+    /// Блок: событие и новое дерево — JSON для программы.
+    pub fn block(lang: &str, source: &str, event: &str, context: &str) -> Result<String, String> {
+        with(|p| {
+            let e = crate::ui::Event::from_json(event)?;
+            p.block_event(lang, source, &e, &crate::BlockContext::from_json(context));
+            p.render_block(lang, source, context).map(|t| t.to_json())
+        })
+        .unwrap_or_else(|| Err("the plugin is not activated".into()))
+    }
+
     /// Панель: событие (если есть) и новое дерево — JSON для программы.
     pub fn panel(panel: &str, event: Option<&str>, context: &str) -> Result<String, String> {
         with(|p| {
@@ -249,6 +282,10 @@ macro_rules! register_plugin {
 
             fn panel_event(panel: String, event: String, context: String) -> Result<String, String> {
                 $crate::rt::panel(&panel, Some(&event), &context)
+            }
+
+            fn block_event(lang: String, source: String, event: String, context: String) -> Result<String, String> {
+                $crate::rt::block(&lang, &source, &event, &context)
             }
         }
 

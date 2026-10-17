@@ -1818,6 +1818,7 @@ dependencies = [
 name = "forma-shell"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "eframe",
  "env_logger",
  "forma-actions",

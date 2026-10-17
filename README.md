@@ -40,7 +40,7 @@ Apps built on Forma Core:
 | `forma-actions` | Actions and the keymap |
 | `forma-settings` | Settings components, their files, export and import; the plugin settings schema and the user `settings.json` (JSON with comments, edited by the settings window and by hand alike, like VS Code) |
 | `forma-plugins` | Plugins: the `.fpl` format and `forma-plugin.toml` manifest, dependency checks like a mod loader, installing, removing, turning on and off; built-in plugins an app ships with |
-| `forma-plugin-host` | Runs plugin code: WebAssembly components in a wasmtime sandbox, API `forma:plugin@1.2.0` described in WIT; background programs a plugin starts live in a Windows Job Object and die with it |
+| `forma-plugin-host` | Runs plugin code: WebAssembly components in a wasmtime sandbox, API `forma:plugin@1.3.0` described in WIT (1.3: live note blocks — `block-event`, `refresh-blocks`, opening things in another Forma app); background programs a plugin starts live in a Windows Job Object and die with it |
 | `forma-plugin-api` | The SDK for plugin authors: implement `Plugin`, call `register_plugin!`, build for `wasm32-wasip2` |
 | `forma-plugin-ui` | The element tree a plugin describes its UI with (blocks, panels), like `UILayout` in Blender add-ons, plus a canvas of shapes, a before/after compare and a 3D model view; the app draws it with `forma_ui::elements` |
 | `forma-i18n` | Localization with Fluent, the `t!` macro, translation completeness checks; the platform's own strings |
@@ -105,7 +105,7 @@ Forma Core — ядро, на котором построены программ
 | `forma-actions` | Действия и раскладка клавиш |
 | `forma-settings` | Компоненты настроек, их файлы, экспорт и импорт; схема настроек плагинов и пользовательский `settings.json` (JSON с комментариями, его правят и окно настроек, и человек, как в VS Code) |
 | `forma-plugins` | Плагины: формат `.fpl` и манифест `forma-plugin.toml`, проверка зависимостей, как у загрузчика модов, установка, удаление, включение и выключение; встроенные плагины программы |
-| `forma-plugin-host` | Запуск code плагинов: компоненты WebAssembly в песочнице wasmtime, API `forma:plugin@1.2.0` на WIT; программы, запущенные плагином в фоне, живут в Windows Job Object и умирают вместе с ним |
+| `forma-plugin-host` | Запуск code плагинов: компоненты WebAssembly в песочнице wasmtime, API `forma:plugin@1.3.0` на WIT (1.3: живые блоки заметок — `block-event`, `refresh-blocks`, открыть в другой программе Forma); программы, запущенные плагином в фоне, живут в Windows Job Object и умирают вместе с ним |
 | `forma-plugin-api` | SDK для авторов плагинов: реализовать `Plugin`, вызвать `register_plugin!`, собрать под `wasm32-wasip2` |
 | `forma-plugin-ui` | Дерево элементов, которым плагин описывает интерфейс (блоки, панели), как `UILayout` у аддонов Blender, а ещё холст с фигурами, сравнение «до и после» и просмотр 3D-модели; рисует его программа через `forma_ui::elements` |
 | `forma-i18n` | Локализация на Fluent, макрос `t!`, проверка полноты переводов; строки самой платформы |

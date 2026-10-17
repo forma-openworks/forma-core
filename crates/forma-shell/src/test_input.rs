@@ -69,7 +69,8 @@ impl Script {
         // Недописанную последнюю строку оставляем до следующего раза.
         let complete = text.rfind('\n').map_or(0, |i| i + 1);
         self.read += complete as u64;
-        self.queue.extend(text[..complete].lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')).map(str::to_owned));
+        // BOM в начале строки (PowerShell пишет его, создавая файл в UTF-8) — не часть команды.
+        self.queue.extend(text[..complete].lines().map(|l| l.trim().trim_start_matches('\u{feff}')).filter(|l| !l.is_empty() && !l.starts_with('#')).map(str::to_owned));
     }
 
     fn busy(&self) -> bool {

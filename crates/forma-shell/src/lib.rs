@@ -19,6 +19,7 @@ pub mod caption;
 pub mod chrome;
 mod dialogs;
 pub mod highlight;
+pub mod instance;
 pub mod look;
 pub mod plugin_panels;
 pub mod plugins;
@@ -55,6 +56,8 @@ where
 {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
+    // Где лежит `.exe`: плагины других программ Forma откроют в ней проект или заметку.
+    instance::register(spec.plugin_app());
     let mut store = Store::new(spec.config_dir());
     // Сначала настройки программы: при первом запуске она может перенести свои старые
     // настройки, в том числе в компоненты платформы (тему, масштаб).

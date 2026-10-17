@@ -1,11 +1,11 @@
-/// API плагинов Forma, версия 1.2: что программа даёт code плагина (host) и что code плагина
+/// API плагинов Forma, версия 1.3: что программа даёт code плагина (host) и что code плагина
 /// умеет сам (экспорты мира `plugin`). Плагин — компонент WebAssembly (`wasm32-wasip2`),
 /// работает в песочнице и видит только то, что разрешено в `[permissions]` его манифеста.
 ///
 /// Тексты сложной формы (контекст, дерево элементов, события) передаются JSON-строками: так
 /// их можно расширять без новой версии API, а SDK `forma-plugin-api` даёт к ним типы. Дерево
 /// элементов описано в crate `forma-plugin-ui`.
-package forma:plugin@1.2.0;
+package forma:plugin@1.3.0;
 
 /// Общие типы.
 interface types {
@@ -131,6 +131,18 @@ interface host {
     /// `linked:read`; без него — пусто. Внутри них работают `read-file`, `read-bytes`,
     /// `list-dir` (полный путь или `linked:<имя>/…`) и `cwd` у `spawn`.
     linked-dirs: func() -> list<string>;
+
+    /// Нарисовать заново все блоки заметок этого плагина (с версии 1.3): поменялось то, что
+    /// они показывают (пришёл итог проверки, который плагин ждал от своей программы).
+    refresh-blocks: func();
+
+    /// Открыть в другой программе Forma (с версии 1.3), только из `[permissions] apps`:
+    /// `app` — `instar` или `holotype`; `root` — папка проекта или хранилища (от корня,
+    /// `linked:<имя>/…` или полный путь внутри хранилища или связанной папки); `open` — что
+    /// открыть в ней: файл (полный путь или от `root`, можно с `:строка`) или заметку
+    /// (`цель#раздел`); пусто — только саму папку. Если программа с этой папкой уже открыта,
+    /// она получает `open` и выходит вперёд, иначе программа запускается.
+    open-app: func(app: string, root: string, open: string) -> result<_, string>;
 }
 
 /// Плагин API 1.0–1.1: по этому миру программа загружает и плагины, собранные до 1.2.
@@ -164,7 +176,8 @@ world plugin-base {
     export panel-event: func(panel: string, event: string, context: string) -> result<string, string>;
 }
 
-/// Плагин API 1.2: всё, что у `plugin-base`, и события своих задач.
+/// Плагин API 1.2–1.3: всё, что у `plugin-base`, события своих задач и (с 1.3) события
+/// блоков заметок. Программа находит эти экспорты по имени: у плагинов старых версий их нет.
 world plugin {
     include plugin-base;
     use types.{job-event};
@@ -172,4 +185,8 @@ world plugin {
     /// События задач, запущенных `spawn` (строки вывода, завершение), — пачкой, в начале
     /// кадра программы. Обновить панель — `refresh-panel`.
     export job-events: func(events: list<job-event>);
+
+    /// Событие элемента блока заметки (с версии 1.3; JSON: `id`, `kind`, `value`) → новое
+    /// дерево этого блока. `lang` и `source` — какой блок, `context` — как у `render-block`.
+    export block-event: func(lang: string, source: string, event: string, context: string) -> result<string, string>;
 }

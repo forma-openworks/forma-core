@@ -96,6 +96,9 @@ pub fn asks(p: &Permissions) -> Vec<String> {
     if !p.process.is_empty() {
         out.push(t!("plugin-perm-process", list = p.process.join(", ")));
     }
+    if !p.apps.is_empty() {
+        out.push(t!("plugin-perm-apps", list = p.apps.join(", ")));
+    }
     for f in &p.files {
         out.push(match f.as_str() {
             "vault:read" => t!("plugin-perm-vault-read"),

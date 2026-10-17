@@ -18,6 +18,7 @@
 //!
 //! [permissions]
 //! process = ["claude"]               # какие программы плагин может запускать
+//! apps = ["instar"]                  # какие программы Forma может открыть (API 1.3)
 //! files = ["vault:read"]             # что читать и писать
 //!
 //! [contributes]
@@ -43,7 +44,7 @@ pub const LEGACY_MANIFEST: &str = "plugin.toml";
 
 /// Версия API плагинов, которую понимает эта платформа.
 pub fn api_version() -> semver::Version {
-    semver::Version::new(1, 2, 0)
+    semver::Version::new(1, 3, 0)
 }
 
 /// Вид плагина — категория на странице «Плагины». В новом манифесте её можно не писать:
@@ -132,11 +133,15 @@ pub struct Permissions {
     /// (связанные папки хранилища: практика курса, связанные курсы), `data` (своя папка).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<String>,
+    /// Какие программы Forma плагин может открыть на проекте или заметке (`instar`,
+    /// `holotype`; API 1.3).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<String>,
 }
 
 impl Permissions {
     pub fn is_empty(&self) -> bool {
-        self.process.is_empty() && self.files.is_empty()
+        self.process.is_empty() && self.files.is_empty() && self.apps.is_empty()
     }
 }
 

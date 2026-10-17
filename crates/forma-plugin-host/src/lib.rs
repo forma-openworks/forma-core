@@ -73,6 +73,10 @@ pub enum Request {
     AppendToNote { plugin: String, note: String, markdown: String },
     /// Дописать markdown в конец раздела заметки с заголовком `heading`.
     AppendToSection { plugin: String, note: String, heading: String, markdown: String },
+    /// Нарисовать заново все блоки заметок плагина (API 1.3).
+    RefreshBlocks { plugin: String },
+    /// Открыть в программе Forma `app` папку `root` (полный путь) и в ней `open` (API 1.3).
+    OpenApp { plugin: String, app: String, root: PathBuf, open: String },
 }
 
 /// Панель плагина (вклад `panels`).
@@ -361,6 +365,26 @@ impl forma::plugin::host::Host for State {
         }
         self.linked.lock().map(|l| l.iter().map(|(_, p)| p.to_string_lossy().into_owned()).collect()).unwrap_or_default()
     }
+
+    fn refresh_blocks(&mut self) {
+        self.request(Request::RefreshBlocks { plugin: self.plugin.clone() });
+    }
+
+    fn open_app(&mut self, app: String, root: String, open: String) -> Result<(), String> {
+        if !self.permissions.apps.contains(&app) {
+            return Err(format!("plugin {} has no permission to open {app:?}", self.plugin));
+        }
+        let dir = match root.trim() {
+            "" => self.root.clone().ok_or("no vault or project is open")?,
+            r => self.readable(r)?,
+        };
+        if !dir.is_dir() {
+            return Err(format!("{root}: not a folder"));
+        }
+        log::info!("plugin {}: opens {open:?} of {} in {app}", self.plugin, dir.display());
+        self.request(Request::OpenApp { plugin: self.plugin.clone(), app, root: dir, open });
+        Ok(())
+    }
 }
 
 /// Скомпилированный модуль плагина (компиляция идёт в фоне).
@@ -376,7 +400,13 @@ struct Live {
     bindings: PluginBase,
     /// Экспорт `job-events` (API 1.2); у плагинов до 1.2 его нет.
     job_events: Option<TypedFunc<(Vec<JobEvent>,), ()>>,
+    /// Экспорт `block-event` (API 1.3); у плагинов до 1.3 его нет — их блоки не отвечают на
+    /// действия, как раньше.
+    block_event: Option<BlockEventFn>,
 }
+
+/// `block-event(lang, source, event, context) -> result<string, string>`.
+type BlockEventFn = TypedFunc<(String, String, String, String), (Result<String, String>,)>;
 
 /// Плагин с code.
 struct Slot {
@@ -749,19 +779,21 @@ impl Runtime {
             .instantiate(&mut store, &component)
             .and_then(|instance| {
                 let bindings = PluginBase::new(&mut store, &instance)?;
-                // API 1.2: события задач. У плагинов до 1.2 этого экспорта нет — и не надо.
+                // API 1.2: события задач, API 1.3: события блоков. У плагинов старых версий
+                // этих экспортов нет — и не надо.
                 let job_events = instance.get_typed_func::<(Vec<JobEvent>,), ()>(&mut store, "job-events").ok();
-                Ok((bindings, job_events))
+                let block_event = instance.get_typed_func::<(String, String, String, String), (Result<String, String>,)>(&mut store, "block-event").ok();
+                Ok((bindings, job_events, block_event))
             })
             .map_err(|e| format!("{e:#}"))
-            .and_then(|(bindings, job_events)| match bindings.call_activate(&mut store, &context) {
-                Ok(Ok(())) => Ok((bindings, job_events)),
+            .and_then(|(bindings, job_events, block_event)| match bindings.call_activate(&mut store, &context) {
+                Ok(Ok(())) => Ok((bindings, job_events, block_event)),
                 Ok(Err(e)) => Err(e),
                 Err(trap) => Err(format!("{trap:#}")),
             });
         match started {
-            Ok((bindings, job_events)) => {
-                self.slots[i].live = Some(Live { store, bindings, job_events });
+            Ok((bindings, job_events, block_event)) => {
+                self.slots[i].live = Some(Live { store, bindings, job_events, block_event });
                 true
             }
             Err(e) => {
@@ -825,6 +857,24 @@ impl Runtime {
     pub fn render_block(&mut self, lang: &str, source: &str, context: &str) -> Option<Result<String, String>> {
         let i = self.slots.iter().position(|s| s.failed.is_none() && s.manifest.contributes.blocks.iter().any(|b| b.lang.eq_ignore_ascii_case(lang)))?;
         self.call(i, |b, s| b.call_render_block(s, lang, source, context))
+    }
+
+    /// Событие элемента блока ` ```lang ` с текстом `source` (JSON события) → новое дерево блока
+    /// (JSON). `None` — блока ни у кого нет, плагин ещё готовится или он старше API 1.3 (его
+    /// блоки событий не ждут).
+    pub fn block_event(&mut self, lang: &str, source: &str, event: &str, context: &str) -> Option<Result<String, String>> {
+        let i = self.slots.iter().position(|s| s.failed.is_none() && s.manifest.contributes.blocks.iter().any(|b| b.lang.eq_ignore_ascii_case(lang)))?;
+        if !self.ensure_live(i) {
+            return None;
+        }
+        let f = self.slots[i].live.as_ref().and_then(|l| l.block_event)?;
+        let args = (lang.to_owned(), source.to_owned(), event.to_owned(), context.to_owned());
+        self.call(i, |_, s| f.call(s, args)).map(|(r,)| r)
+    }
+
+    /// Плагин, который рисует блоки ` ```lang `.
+    pub fn block_plugin(&self, lang: &str) -> Option<String> {
+        self.slots.iter().find(|s| s.manifest.contributes.blocks.iter().any(|b| b.lang.eq_ignore_ascii_case(lang))).map(|s| s.id().to_owned())
     }
 
     /// Команда `id` (из манифеста какого-то плагина).

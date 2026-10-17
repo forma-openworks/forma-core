@@ -283,6 +283,8 @@ pub struct Shell<S: AppSettings, B: Builtin> {
     /// `settings.json` ждёт её в [`Shell::take_open_files`], а не открывается в системе.
     pub edit_in_app: bool,
     open_files: Vec<PathBuf>,
+    /// Слушатель своей папки (хранилища, проекта): второй запуск с ней передаёт, что открыть.
+    instance: Option<(PathBuf, crate::instance::Listener)>,
     /// Экран приветствия вместо рабочего интерфейса.
     pub welcome: bool,
     pub(crate) modal: Option<Modal<S>>,
@@ -386,6 +388,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
             runtime_settings: None,
             edit_in_app: false,
             open_files: Vec::new(),
+            instance: None,
             welcome: true,
             modal: None,
             app_modal: false,
@@ -925,6 +928,34 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
     /// Файлы, которые оболочка просит программу открыть (`settings.json`).
     pub fn take_open_files(&mut self) -> Vec<PathBuf> {
         std::mem::take(&mut self.open_files)
+    }
+
+    /// Открыта папка `root` (хранилище, проект): программа слушает её канал, и второй запуск
+    /// с этой папкой или плагин другой программы передают ей, что открыть
+    /// ([`crate::instance`]). Вызывать можно каждый кадр: та же папка — ничего не делается.
+    pub fn serve_root(&mut self, root: Option<&std::path::Path>) {
+        if self.instance.as_ref().map(|(r, _)| r.as_path()) == root {
+            return;
+        }
+        self.instance = None;
+        if let Some(root) = root {
+            let ctx = self.ctx.clone();
+            match crate::instance::Listener::start(self.spec.plugin_app(), root, move || ctx.request_repaint()) {
+                Some(l) => self.instance = Some((root.to_path_buf(), l)),
+                None => log::info!("{} is already served by another instance", root.display()),
+            }
+        }
+    }
+
+    /// Что просили открыть с прошлого раза (значения `--open`). Пришла просьба — окно
+    /// выходит вперёд.
+    pub fn take_forwarded(&mut self) -> Vec<String> {
+        let got: Vec<String> = self.instance.as_ref().map(|(_, l)| l.take().into_iter().map(|m| m.open).collect()).unwrap_or_default();
+        if !got.is_empty() {
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            self.ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        got
     }
 
     /// Распаковывает плагин из файла и показывает окно согласия: что он приносит и что просит.
