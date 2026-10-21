@@ -335,7 +335,9 @@ impl Draw<'_> {
                 }
             }
             Element::TextInput { id, value, placeholder, multiline, search, mono, prefix, suffix, tone } => {
-                if *mono || !prefix.is_empty() || !suffix.is_empty() || *tone != Tone::Normal {
+                if *multiline && *mono {
+                    self.code_input(ui, id, value, placeholder, *tone, path);
+                } else if *mono || !prefix.is_empty() || !suffix.is_empty() || *tone != Tone::Normal {
                     self.framed_input(ui, id, value, placeholder, *mono, prefix, suffix, *tone, path);
                 } else {
                     self.text_input(ui, id, value, placeholder, *multiline, *search, path);
@@ -862,6 +864,43 @@ impl Draw<'_> {
         ui.data_mut(|d| d.insert_temp(sid.with("text"), (seen, text)));
     }
 
+    /// Многострочное поле с моноширинным шрифтом — редактор code: Tab вставляет отступ, а не
+    /// уводит фокус, высота растёт вместе с code.
+    fn code_input(&mut self, ui: &mut Ui, id: &str, value: &str, placeholder: &str, tone: Tone, path: Id) {
+        let pal = self.pal;
+        let sid = self.state_id(path, id);
+        let (mut seen, mut text): (String, String) = ui.data(|d| d.get_temp(sid.with("text"))).unwrap_or_else(|| (value.to_owned(), value.to_owned()));
+        if seen != value {
+            seen = value.to_owned();
+            text = value.to_owned();
+        }
+        let focused = ui.memory(|m| m.has_focus(sid));
+        let stroke = tone_accent(pal, tone).unwrap_or(if focused { pal.accent } else { pal.border });
+        let width = if self.in_grid { GRID_INPUT } else { ui.available_width() };
+        let rows = text.lines().count().max(4) + 1;
+        let mut changed = false;
+        ui.allocate_ui(vec2(width, 0.0), |ui| {
+            Frame::new().fill(pal.input_bg).stroke(Stroke::new(1.0, stroke)).corner_radius(CornerRadius::same(6)).inner_margin(Margin::symmetric(8, 6)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let edit = egui::TextEdit::multiline(&mut text)
+                    .id(sid)
+                    .code_editor()
+                    .font(FontId::monospace(CODE))
+                    .text_color(pal.heading)
+                    .hint_text(placeholder)
+                    .frame(Frame::NONE)
+                    .margin(Margin::ZERO)
+                    .desired_rows(rows)
+                    .desired_width(ui.available_width());
+                changed = ui.add(edit).changed();
+            });
+        });
+        if changed {
+            self.event(id, EventKind::Change, Value::String(text.clone()));
+        }
+        ui.data_mut(|d| d.insert_temp(sid.with("text"), (seen, text)));
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn group(&mut self, ui: &mut Ui, title: &str, icon: Option<&str>, children: &[Element], collapsible: bool, open: bool, path: Id) {
         let pal = self.pal;
@@ -1063,6 +1102,7 @@ let y = {{u}};".into(), lang: "rust".into(), blanks: vec![Blank { id: "t".into()
             Element::Grid { columns: vec!["i".into(), "sum".into()], rows: vec![vec![ui::label("1"), ui::text_input("r1", "2", "")]] },
             Element::Reorder { id: "lines".into(), items: vec![ui::item("a", "let sum = 0;"), ui::item("b", "return sum;")], lang: "rust".into(), enabled: true },
             Element::TextInput { id: "re".into(), value: "\\d+".into(), placeholder: String::new(), multiline: false, search: false, mono: true, prefix: "/".into(), suffix: "/".into(), tone: Tone::Danger },
+            Element::TextInput { id: "code".into(), value: "static bool IsValidPort(int port)\n{\n\treturn port > 0;\n}".into(), placeholder: "// твой code".into(), multiline: true, search: false, mono: true, prefix: String::new(), suffix: String::new(), tone: Tone::Normal },
             Element::Label { text: "formatPrice(990)".into(), icon: Some("check".into()), tone: Tone::Success, size: Size::Normal, bold: false, mono: true },
             Element::Unknown,
         ]);
