@@ -43,6 +43,7 @@ Apps built on Forma Core:
 | `forma-plugin-host` | Runs plugin code: WebAssembly components in a wasmtime sandbox, API `forma:plugin@1.3.0` described in WIT (1.3: live note blocks — `block-event`, `refresh-blocks`, opening things in another Forma app); background programs a plugin starts live in a Windows Job Object and die with it |
 | `forma-plugin-api` | The SDK for plugin authors: implement `Plugin`, call `register_plugin!`, build for `wasm32-wasip2` |
 | `forma-plugin-ui` | The element tree a plugin describes its UI with (blocks, panels), like `UILayout` in Blender add-ons, plus a canvas of shapes, a before/after compare and a 3D model view; the app draws it with `forma_ui::elements` |
+| `forma-images` | Images of any format: everything the `image` crate reads (PNG, JPEG, TIFF, TGA, DDS, HDR, EXR…), SVG, Photoshop PSD, JPEG XL and, on Windows, whatever the system codecs read (HEIC, AVIF, camera RAW). An egui image loader for `file:///…` that reads in the background and shrinks huge images to the GPU texture limit; without the `decode` feature — just the list of formats |
 | `forma-i18n` | Localization with Fluent, the `t!` macro, translation completeness checks; the platform's own strings |
 | `forma-build` | Build-script helpers: embedding `.ftl` translations, the Windows icon and version info |
 
@@ -108,6 +109,7 @@ Forma Core — ядро, на котором построены программ
 | `forma-plugin-host` | Запуск code плагинов: компоненты WebAssembly в песочнице wasmtime, API `forma:plugin@1.3.0` на WIT (1.3: живые блоки заметок — `block-event`, `refresh-blocks`, открыть в другой программе Forma); программы, запущенные плагином в фоне, живут в Windows Job Object и умирают вместе с ним |
 | `forma-plugin-api` | SDK для авторов плагинов: реализовать `Plugin`, вызвать `register_plugin!`, собрать под `wasm32-wasip2` |
 | `forma-plugin-ui` | Дерево элементов, которым плагин описывает интерфейс (блоки, панели), как `UILayout` у аддонов Blender, а ещё холст с фигурами, сравнение «до и после» и просмотр 3D-модели; рисует его программа через `forma_ui::elements` |
+| `forma-images` | Картинки любых форматов: всё, что читает крейт `image` (PNG, JPEG, TIFF, TGA, DDS, HDR, EXR…), SVG, Photoshop PSD, JPEG XL, а в Windows — всё, что читают кодеки системы (HEIC, AVIF, RAW с камер). Загрузчик картинок egui для `file:///…`: читает в фоне и уменьшает огромные картинки под предел видеокарты; без фичи `decode` — только список форматов |
 | `forma-i18n` | Локализация на Fluent, макрос `t!`, проверка полноты переводов; строки самой платформы |
 | `forma-build` | Помощники сборочных скриптов: вшивание переводов `.ftl`, значка и сведений о версии для Windows |
 

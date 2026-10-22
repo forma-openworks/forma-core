@@ -1,0 +1,27 @@
+[package]
+name = "forma-images"
+description = "Картинки любых форматов для программ Forma: чтение файла в изображение и загрузчик картинок egui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# Чтение картинок и загрузчик egui. Без неё — только список форматов ([`is_image`]).
+default = ["decode"]
+decode = ["dep:egui", "dep:log", "dep:image", "dep:resvg", "dep:psd", "dep:jxl-oxide", "dep:windows"]
+
+[dependencies]
+egui = { workspace = true, optional = true }
+log = { workspace = true, optional = true }
+# Всё, что умеет читать крейт image (кроме AVIF: ему нужна библиотека на C).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico", "tiff", "tga", "dds", "hdr", "exr", "pnm", "qoi", "ff"], optional = true }
+# SVG — тем же resvg, что и значки; текст в SVG — системными шрифтами.
+resvg = { version = "0.48.1", default-features = false, features = ["text", "system-fonts", "raster-images"], optional = true }
+# Photoshop: сведённое изображение.
+psd = { version = "0.3", optional = true }
+# JPEG XL на чистом Rust.
+jxl-oxide = { version = "0.12", optional = true }
+
+# Остальное (HEIC, AVIF, RAW с камер, JPEG XR) — системными кодеками Windows (WIC).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Imaging", "Win32_System_Com"], optional = true }
