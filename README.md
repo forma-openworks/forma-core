@@ -26,9 +26,10 @@ Forma Core is the base that FORMA desktop apps are built on. It gives an app its
 
 Apps built on Forma Core:
 
-- [Forma Mycelium](https://github.com/forma-openworks/forma-mycelium), an IDE made for Minecraft modding;
-- Forma: Holotype, notes, study notes and documentation in the spirit of Obsidian;
-- Forma: Instar, a full-featured IDE (being designed).
+- [Forma: Holotype](https://github.com/forma-openworks/forma-holotype), notes, study notes and documentation in the spirit of Obsidian;
+- Forma Word, a document editor in the spirit of Word for study materials and lab worksheets: formulas, charts and printing (in development).
+
+First-party plugins live in [Forma plugins](https://github.com/forma-openworks/forma-plugins).
 
 ### Crates
 
@@ -92,9 +93,10 @@ Forma Core — ядро, на котором построены программ
 
 Программы на Forma Core:
 
-- [Forma Mycelium](https://github.com/forma-openworks/forma-mycelium) — среда разработки для модов Minecraft;
-- Forma: Holotype — заметки, конспекты и документация в духе Obsidian;
-- Forma: Instar — полноценная среда разработки (проектируется).
+- [Forma: Holotype](https://github.com/forma-openworks/forma-holotype) — заметки, конспекты и документация в духе Obsidian;
+- Forma Word — редактор документов в духе Word для учебных материалов и лабораторных: формулы, графики и печать (в разработке).
+
+Собственные плагины лежат в [Forma plugins](https://github.com/forma-openworks/forma-plugins).
 
 ### Крейты
 
