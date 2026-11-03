@@ -9,9 +9,9 @@
 use std::collections::HashMap;
 
 use egui::text::{CCursor, LayoutJob};
-use egui::{Align, Color32, CornerRadius, CursorIcon, FontId, Frame, Id, Layout, Margin, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Align, Color32, CornerRadius, CursorIcon, FontId, Frame, Id, Layout, Margin, Rect, RichText, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use forma_i18n::t;
-use forma_plugin_ui::{Blank, Chip, Element, Event, EventKind, Item, Mark, Marker, Size, Span, Tab, Tone};
+use forma_plugin_ui::{Blank, Chip, Element, Event, EventKind, Item, Mark, Marker, PairRow, Size, Span, Tab, Tone};
 use serde_json::Value;
 
 use crate::theme::Palette;
@@ -91,6 +91,19 @@ struct Draw<'a> {
 
 /// Кегль code в элементах задач.
 const CODE: f32 = 13.0;
+/// Высота места под понятие в [`Element::Pairs`] и фишки понятия.
+const SLOT_H: f32 = 34.0;
+const PILL_H: f32 = 28.0;
+/// Поле у текста фишки на месте: справа — под крестиком, слева столько же, чтобы текст
+/// стоял посередине фишки.
+const PILL_PAD: f32 = 28.0;
+
+/// Что тянут в [`Element::Pairs`]: понятие `term` элемента `el` (чужие «пары» его не примут).
+#[derive(Clone)]
+struct PairDrag {
+    el: Id,
+    term: String,
+}
 /// Ширина поля ввода в ячейке таблицы.
 const GRID_INPUT: f32 = 96.0;
 
@@ -454,6 +467,7 @@ impl Draw<'_> {
                 });
             }
             Element::Reorder { id, items, lang, enabled } => self.reorder(ui, id, items, lang, *enabled),
+            Element::Pairs { id, terms, rows, mono, enabled } => self.pairs(ui, id, terms, rows, *mono, *enabled, path),
             Element::Unknown => {
                 ui.label(RichText::new(t!("plugin-ui-unknown")).size(12.0).italics().color(pal.text_faint));
             }
@@ -821,6 +835,191 @@ impl Draw<'_> {
         }
     }
 
+    /// «Соедини понятие с описанием»: поле с нерасставленными понятиями и строки «место —
+    /// описание». Понятие ставят перетаскиванием или щелчками; программа только сообщает
+    /// плагину, куда что поставили, а вытесняет прежнее понятие с занятого места плагин.
+    #[allow(clippy::too_many_arguments)]
+    fn pairs(&mut self, ui: &mut Ui, id: &str, terms: &[Item], rows: &[PairRow], mono: bool, enabled: bool, path: Id) {
+        let pal = self.pal;
+        let sid = self.state_id(path, id).with("pairs");
+        let font = if mono { FontId::monospace(12.5) } else { FontId::proportional(13.0) };
+        let sense = if enabled { Sense::click_and_drag() } else { Sense::hover() };
+        // Понятие, выбранное щелчком, ждёт, на какое место его поставят.
+        let sel: Option<String> = ui.data(|d| d.get_temp::<String>(sid.with("sel"))).filter(|s| terms.iter().any(|t| &t.id == s));
+        let dragging = egui::DragAndDrop::payload::<PairDrag>(ui.ctx()).filter(|p| p.el == sid);
+        let text_of = |term: &str| terms.iter().find(|t| t.id == term).map_or_else(|| term.to_owned(), |t| t.text.clone());
+        // Куда поставили понятие (`None` — обратно в поле) и какое выбрали щелчком.
+        let mut placed: Option<(String, Option<String>)> = None;
+        let mut picked: Option<String> = None;
+        let width = ui.available_width();
+        let left = ui.max_rect().left();
+
+        // Фишка понятия: тянется, щёлкается, при перетаскивании летит за курсором.
+        let pill = |ui: &mut Ui, rect: Rect, term: &str, tone: Tone, pad: f32| -> egui::Response {
+            let resp = ui.interact(rect, sid.with(("term", term)), sense);
+            resp.dnd_set_drag_payload(PairDrag { el: sid, term: term.to_owned() });
+            let lifted = resp.dragged();
+            let hovered = enabled && resp.hovered() && !lifted;
+            let (fill, stroke, color) = match tone_accent(pal, tone) {
+                Some(c) => (c.gamma_multiply(0.18), c, pal.heading),
+                None if sel.as_deref() == Some(term) => (pal.accent.gamma_multiply(0.2), pal.accent, pal.heading),
+                None if hovered => (pal.bg_hover, pal.border_strong, pal.heading),
+                None => (pal.chip_bg, pal.chip_border, pal.text),
+            };
+            let fade = if lifted { 0.35 } else { 1.0 };
+            let g = crate::widgets::elide(ui, text_of(term), font.clone(), color, rect.width() - 2.0 * pad);
+            let paint = |painter: &egui::Painter, r: Rect, fill: Color32, stroke: Color32, g: std::sync::Arc<egui::Galley>| {
+                painter.rect(r, CornerRadius::same((PILL_H / 2.0) as u8), fill, Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+                painter.galley(r.center() - g.size() / 2.0, g, color);
+            };
+            paint(ui.painter(), rect, fill.gamma_multiply(fade), stroke.gamma_multiply(fade), g.clone());
+            if lifted && let Some(p) = ui.ctx().pointer_interact_pos() {
+                ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+                let layer = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Tooltip, sid.with("ghost")));
+                let r = Rect::from_center_size(p, rect.size());
+                layer.rect_filled(r.translate(vec2(0.0, 3.0)), CornerRadius::same((PILL_H / 2.0) as u8), Color32::from_black_alpha(70));
+                paint(&layer, r, pal.bg_elevated, pal.accent, g);
+            } else if hovered {
+                ui.ctx().set_cursor_icon(CursorIcon::Grab);
+            }
+            resp
+        };
+
+        // Поле с понятиями, которые ещё не расставлены.
+        let pool: Vec<&Item> = terms.iter().filter(|t| !rows.iter().any(|r| r.term.as_deref() == Some(t.id.as_str()))).collect();
+        let frame = Frame::new().inner_margin(Margin::same(8)).corner_radius(CornerRadius::same(10));
+        let mut prepared = frame.begin(ui);
+        {
+            let ui = &mut prepared.content_ui;
+            ui.set_width(ui.available_width());
+            if pool.is_empty() {
+                let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), PILL_H), Sense::hover());
+                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, t!("plugin-ui-pairs-done"), FontId::proportional(12.0), pal.text_faint);
+            } else {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
+                    for t in &pool {
+                        let w = ui.painter().layout_no_wrap(t.text.clone(), font.clone(), pal.text).size().x + 2.0 * 14.0;
+                        fit_row(ui, w);
+                        let (rect, _) = ui.allocate_exact_size(vec2(w.min(ui.available_width()), PILL_H), Sense::hover());
+                        if pill(ui, rect, &t.id, Tone::Normal, 14.0).clicked() {
+                            picked = Some(t.id.clone());
+                        }
+                    }
+                });
+            }
+        }
+        let pool_rect = prepared.allocate_space(ui).rect;
+        let pool_resp = ui.interact(pool_rect, sid.with("pool"), Sense::hover());
+        let over_pool = dragging.is_some() && pool_resp.contains_pointer();
+        prepared.frame.fill = if over_pool { pal.accent.gamma_multiply(0.08) } else { Color32::TRANSPARENT };
+        prepared.paint(ui);
+        dashed_round_rect(ui.painter(), pool_rect, 10.0, Stroke::new(1.0, if over_pool { pal.accent } else { pal.border_strong }));
+        if let Some(p) = pool_resp.dnd_release_payload::<PairDrag>()
+            && p.el == sid
+            && rows.iter().any(|r| r.term.as_deref() == Some(p.term.as_str()))
+        {
+            placed = Some((p.term.clone(), None));
+        }
+
+        // Строки «место — описание»: место по середине строки, описание справа.
+        let slot_w = terms.iter().map(|t| ui.painter().layout_no_wrap(t.text.clone(), font.clone(), pal.text).size().x).fold(0.0, f32::max) + 2.0 * PILL_PAD + 8.0;
+        let slot_w = slot_w.clamp(150.0, (width * 0.45).max(150.0));
+        let gap = 14.0;
+        ui.add_space(6.0);
+        let line = |ui: &Ui, y: f32| ui.painter().hline(left..=left + width, y + 0.5, Stroke::new(1.0, pal.border));
+        line(ui, ui.cursor().top());
+        for row in rows {
+            let top = ui.cursor().top();
+            // Высоту описания знаем только нарисовав его: берём прошлую, а если она
+            // изменилась — кадр перерисуется, чтобы описание встало по середине.
+            let hid = sid.with(("h", &row.id));
+            let guess: f32 = ui.data(|d| d.get_temp(hid)).unwrap_or(SLOT_H);
+            let desc_top = top + 8.0 + ((SLOT_H - guess) / 2.0).max(0.0);
+            let desc = Rect::from_min_size(pos2(left + slot_w + gap, desc_top), vec2((width - slot_w - gap).max(80.0), f32::INFINITY));
+            let mut child = ui.new_child(UiBuilder::new().max_rect(desc).layout(Layout::top_down(Align::Min)));
+            self.hooks.markdown(&mut child, pal, &row.text);
+            let h = child.min_rect().height();
+            if (h - guess).abs() > 0.5 {
+                ui.data_mut(|d| d.insert_temp(hid, h));
+                ui.ctx().request_discard("pairs: высота описания");
+            }
+            let row_h = h.max(SLOT_H) + 16.0;
+            let slot = Rect::from_min_size(pos2(left, top + (row_h - SLOT_H) / 2.0), vec2(slot_w, SLOT_H));
+            let slot_resp = ui.interact(slot, sid.with(("slot", &row.id)), if enabled { Sense::click() } else { Sense::hover() });
+            let over = dragging.is_some() && slot_resp.contains_pointer();
+            match &row.term {
+                Some(term) => {
+                    let r = slot.shrink2(vec2(3.0, (SLOT_H - PILL_H) / 2.0));
+                    let resp = pill(ui, r, term, row.tone, PILL_PAD);
+                    // Крестик — поверх фишки, чтобы щелчок по нему не ушёл ей.
+                    let x = Rect::from_center_size(pos2(r.right() - PILL_PAD / 2.0, r.center().y), vec2(18.0, 18.0));
+                    let x_resp = if enabled && !resp.dragged() { Some(ui.interact(x, sid.with(("remove", term)), Sense::click())) } else { None };
+                    if let Some(x_resp) = &x_resp {
+                        let hot = x_resp.hovered();
+                        if hot {
+                            ui.painter().circle_filled(x.center(), 9.0, pal.bg_hover);
+                        }
+                        crate::icons::paint(ui.painter(), Rect::from_center_size(x.center(), vec2(11.0, 11.0)), "close", if hot { pal.heading } else { pal.text_muted });
+                    }
+                    if x_resp.is_some_and(|x| x.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(t!("plugin-ui-pairs-remove")).clicked()) {
+                        placed = Some((term.clone(), None));
+                    } else if resp.clicked() {
+                        // С выбранным понятием щелчок ставит его сюда, без него — убирает это в поле.
+                        placed = match &sel {
+                            Some(s) if s != term => Some((s.clone(), Some(row.id.clone()))),
+                            _ => Some((term.clone(), None)),
+                        };
+                    }
+                    if over {
+                        ui.painter().rect_stroke(slot, CornerRadius::same(8), Stroke::new(1.5, pal.accent), egui::StrokeKind::Inside);
+                    }
+                }
+                None => {
+                    let armed = enabled && sel.is_some();
+                    if over {
+                        ui.painter().rect(slot, CornerRadius::same(8), pal.accent.gamma_multiply(0.12), Stroke::new(1.0, pal.accent), egui::StrokeKind::Inside);
+                    } else {
+                        let hot = armed && slot_resp.hovered();
+                        let c = if hot { pal.accent } else if armed { pal.accent.gamma_multiply(0.55) } else { pal.border_strong };
+                        dashed_round_rect(ui.painter(), slot.shrink(0.5), 8.0, Stroke::new(1.0, c));
+                    }
+                    if enabled {
+                        ui.painter().text(slot.center(), egui::Align2::CENTER_CENTER, t!("plugin-ui-pairs-drop"), FontId::proportional(12.0), pal.text_faint);
+                    }
+                    if armed && slot_resp.clone().on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                        placed = sel.clone().map(|s| (s, Some(row.id.clone())));
+                    }
+                }
+            }
+            if let Some(p) = slot_resp.dnd_release_payload::<PairDrag>()
+                && p.el == sid
+                && row.term.as_deref() != Some(p.term.as_str())
+            {
+                placed = Some((p.term.clone(), Some(row.id.clone())));
+            }
+            ui.advance_cursor_after_rect(Rect::from_min_size(pos2(left, top), vec2(width, row_h)));
+            line(ui, top + row_h);
+        }
+
+        let sel = match (&placed, picked) {
+            (Some(_), _) => None,
+            (None, Some(p)) if sel.as_deref() == Some(p.as_str()) => None,
+            (None, Some(p)) => Some(p),
+            (None, None) if dragging.is_some() => None,
+            (None, None) => sel,
+        };
+        ui.data_mut(|d| match sel {
+            Some(s) => {
+                d.insert_temp(sid.with("sel"), s);
+            }
+            None => d.remove::<String>(sid.with("sel")),
+        });
+        if let Some((term, row)) = placed {
+            self.event(id, EventKind::Change, serde_json::json!({ "term": term, "row": row }));
+        }
+    }
+
     /// Поле ввода в рамке: моноширинное, с текстом до и после, рамкой цветом итога.
     #[allow(clippy::too_many_arguments)]
     fn framed_input(&mut self, ui: &mut Ui, id: &str, value: &str, placeholder: &str, mono: bool, prefix: &str, suffix: &str, tone: Tone, path: Id) {
@@ -1040,6 +1239,26 @@ impl Draw<'_> {
     }
 }
 
+/// Пунктирная рамка со скруглёнными углами (место, куда бросают).
+fn dashed_round_rect(painter: &egui::Painter, rect: Rect, r: f32, stroke: Stroke) {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let corners = [
+        (rect.right_top() + vec2(-r, r), -FRAC_PI_2),
+        (rect.right_bottom() + vec2(-r, -r), 0.0),
+        (rect.left_bottom() + vec2(r, -r), FRAC_PI_2),
+        (rect.left_top() + vec2(r, r), PI),
+    ];
+    let mut points = Vec::with_capacity(4 * 7 + 1);
+    for (center, from) in corners {
+        for i in 0..=6 {
+            let a = from + FRAC_PI_2 * i as f32 / 6.0;
+            points.push(center + vec2(a.cos(), a.sin()) * r);
+        }
+    }
+    points.push(points[0]);
+    painter.extend(egui::Shape::dashed_line(&points, stroke, 5.0, 4.0));
+}
+
 /// Небольшая плашка с текстом.
 fn badge(ui: &mut Ui, pal: &Palette, text: &str, tone: Tone) {
     let color = if tone == Tone::Normal { pal.text_muted } else { tone_color(pal, tone) };
@@ -1101,6 +1320,8 @@ let y = {{u}};".into(), lang: "rust".into(), blanks: vec![Blank { id: "t".into()
             Element::CodeSpans { id: "spot".into(), text: "let a = \"110\";".into(), lang: "rust".into(), spans: vec![Span { id: "s".into(), start: 8, end: 13, tone: Tone::Success }, Span { id: "bad".into(), start: 40, end: 50, tone: Tone::Normal }], selected: Some("s".into()), enabled: true },
             Element::Grid { columns: vec!["i".into(), "sum".into()], rows: vec![vec![ui::label("1"), ui::text_input("r1", "2", "")]] },
             Element::Reorder { id: "lines".into(), items: vec![ui::item("a", "let sum = 0;"), ui::item("b", "return sum;")], lang: "rust".into(), enabled: true },
+            pairs(Some("b"), Tone::Success),
+            pairs(None, Tone::Normal),
             Element::TextInput { id: "re".into(), value: "\\d+".into(), placeholder: String::new(), multiline: false, search: false, mono: true, prefix: "/".into(), suffix: "/".into(), tone: Tone::Danger },
             Element::TextInput { id: "code".into(), value: "static bool IsValidPort(int port)\n{\n\treturn port > 0;\n}".into(), placeholder: "// твой code".into(), multiline: true, search: false, mono: true, prefix: String::new(), suffix: String::new(), tone: Tone::Normal },
             Element::Label { text: "formatPrice(990)".into(), icon: Some("check".into()), tone: Tone::Success, size: Size::Normal, bold: false, mono: true },
@@ -1179,6 +1400,62 @@ let y = {{u}};".into(), lang: "rust".into(), blanks: vec![Blank { id: "t".into()
         let x = 1.0 + 14.0 + 3.5 * 7.8;
         let out = click(&spot, pos2(x, 18.0));
         assert_eq!(out, vec![Output::Event(Event { id: "spot".into(), kind: EventKind::Click, value: Value::String("cd".into()) })], "место «cd» в {x}");
+    }
+
+    /// «Пары» из двух понятий: `a` и `b`; на месте `r1` стоит `placed`.
+    fn pairs(placed: Option<&str>, tone: Tone) -> Element {
+        Element::Pairs {
+            id: "pairs".into(),
+            terms: vec![ui::item("a", "compiler"), ui::item("b", "source code")],
+            rows: vec![
+                PairRow { id: "r1".into(), text: "текст программы".into(), term: placed.map(Into::into), tone },
+                PairRow { id: "r2".into(), text: "переводчик".into(), ..Default::default() },
+            ],
+            mono: true,
+            enabled: true,
+        }
+    }
+
+    /// Кадры подряд в одном контексте: в каждом — свои события ввода; что дерево вернуло.
+    fn frames(tree: &Element, batches: Vec<Vec<egui::Event>>) -> Vec<Output> {
+        forma_i18n::init_with(&[], None);
+        let (ctx, pal) = setup();
+        let mut all = Vec::new();
+        for events in std::iter::once(vec![]).chain(batches).chain(std::iter::once(vec![])) {
+            let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(600.0, 600.0))), events, ..Default::default() };
+            let mut full = ctx.run_ui(input, |ui| all.extend(show(ui, &pal, Id::new("pairs"), tree, &mut Plain)));
+            full.textures_delta.clear();
+        }
+        all
+    }
+
+    fn press(at: egui::Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() }
+    }
+
+    /// Понятие ставят щелчками (понятие, потом место) и перетаскиванием; на месте щелчок
+    /// по крестику возвращает понятие в поле.
+    #[test]
+    fn pairs_report_where_a_term_went() {
+        let change = |term: &str, row: Option<&str>| vec![Output::Event(Event { id: "pairs".into(), kind: EventKind::Change, value: serde_json::json!({ "term": term, "row": row }) })];
+        // Поле: рамка с полем 8, первая фишка «compiler» слева. Строки ниже: место r1 —
+        // слева, посередине первой строки.
+        let chip = pos2(20.0, 22.0);
+        let slot = pos2(75.0, 81.0);
+        let click = |at| vec![vec![egui::Event::PointerMoved(at)], vec![press(at, true)], vec![press(at, false)]];
+        let tree = pairs(None, Tone::Normal);
+        let out = frames(&tree, [click(chip), click(slot)].concat());
+        assert_eq!(out, change("a", Some("r1")), "щелчками");
+        let mut drag = vec![vec![egui::Event::PointerMoved(chip)], vec![press(chip, true)]];
+        for i in 1..=8 {
+            drag.push(vec![egui::Event::PointerMoved(chip + (slot - chip) * i as f32 / 8.0)]);
+        }
+        drag.push(vec![press(slot, false)]);
+        assert_eq!(frames(&tree, drag), change("a", Some("r1")), "перетаскиванием");
+        // На месте r1 стоит «source code»: крестик — у правого края фишки.
+        let placed = pairs(Some("b"), Tone::Normal);
+        let x = pos2(150.0 - 3.0 - PILL_PAD / 2.0, 81.0);
+        assert_eq!(frames(&placed, click(x)), change("b", None), "крестик");
     }
 
     /// Пропуски `{{id}}` становятся пробелами своей ширины; незнакомые и `{{` без пары — как были.

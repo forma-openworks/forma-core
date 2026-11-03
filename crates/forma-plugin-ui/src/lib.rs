@@ -28,7 +28,7 @@
 //! 1.3 события приходят и от блоков заметок (`block-event`), и для них есть элементы задач:
 //! варианты ответа ([`Element::OptionRow`]), ползунок, вкладки, плашки-выбор, code с
 //! пропусками и с местами, на которые нажимают, таблица из элементов, строки, которые
-//! переставляют, шапка блока и строка «слева — справа».
+//! переставляют, понятия, которые ставят к описаниям, шапка блока и строка «слева — справа».
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -520,9 +520,39 @@ pub enum Element {
         #[serde(default = "yes", skip_serializing_if = "is_true")]
         enabled: bool,
     },
+    /// «Соедини понятие с описанием» (элемент задач API 1.3): сверху поле с понятиями, которые
+    /// ещё не расставлены, ниже строки «место — описание» (описание — markdown). Понятие
+    /// ставят на место перетаскиванием или щелчками: понятие, потом место; поставленное на
+    /// занятое место вытесняет прежнее обратно в поле — это решает плагин, программа только
+    /// сообщает, куда что поставили. Событие `change` со значением `{"term": id, "row": id}`;
+    /// `"row": null` — понятие вернули в поле. `mono` — понятия моноширинным шрифтом.
+    Pairs {
+        id: String,
+        #[serde(default)]
+        terms: Vec<Item>,
+        #[serde(default)]
+        rows: Vec<PairRow>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        mono: bool,
+        #[serde(default = "yes", skip_serializing_if = "is_true")]
+        enabled: bool,
+    },
     /// Элемент из более новой версии API: программа показывает пометку вместо него.
     #[serde(other)]
     Unknown,
+}
+
+/// Строка [`Element::Pairs`]: описание и понятие на его месте (id из `terms`); `tone` —
+/// итог проверки этого места.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PairRow {
+    pub id: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub term: Option<String>,
+    #[serde(skip_serializing_if = "is_normal")]
+    pub tone: Tone,
 }
 
 fn one_u8() -> u8 {
@@ -926,6 +956,13 @@ mod tests {
             Element::CodeSpans { id: "spot".into(), text: "let a = \"110\";".into(), lang: "rust".into(), spans: vec![Span { id: "s3".into(), start: 8, end: 13, tone: Tone::Normal }], selected: Some("s3".into()), enabled: true },
             Element::Grid { columns: vec!["i".into(), "sum".into()], rows: vec![vec![label("1"), text_input("r1", "", "")]] },
             Element::Reorder { id: "lines".into(), items: vec![item("l1", "let sum = 0;")], lang: "rust".into(), enabled: true },
+            Element::Pairs {
+                id: "pairs".into(),
+                terms: vec![item("t1", "compiler"), item("t2", "source code")],
+                rows: vec![PairRow { id: "r1".into(), text: "текст программы".into(), term: Some("t2".into()), tone: Tone::Success }, PairRow { id: "r2".into(), text: "переводчик".into(), ..Default::default() }],
+                mono: true,
+                enabled: true,
+            },
             bar([hint("Выбери один вариант")], [primary_button("check", "Проверить", false)]),
         ]);
         let json = tree.to_json();
@@ -934,6 +971,8 @@ mod tests {
         assert_eq!(Element::from_json(&json).unwrap(), tree);
         let short = Element::from_json(r#"{"type":"code-blanks","text":"{{a}}","blanks":[{"id":"a"}]}"#).unwrap();
         assert!(matches!(short, Element::CodeBlanks { ref blanks, enabled: true, .. } if blanks[0].width == 8 && blanks[0].value.is_empty()));
+        let pairs = Element::from_json(r#"{"type":"pairs","id":"p","terms":[{"id":"a","text":"A"}],"rows":[{"id":"r","text":"описание"}]}"#).unwrap();
+        assert!(matches!(pairs, Element::Pairs { ref rows, mono: false, enabled: true, .. } if rows[0].term.is_none() && rows[0].tone == Tone::Normal));
         let slider = Element::from_json(r#"{"type":"slider","id":"s","value":3}"#).unwrap();
         assert!(matches!(slider, Element::Slider { max, step, decimals: 1, enabled: true, .. } if max == 100.0 && step == 1.0));
     }
