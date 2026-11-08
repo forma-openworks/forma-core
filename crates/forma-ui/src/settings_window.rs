@@ -340,14 +340,14 @@ fn footer_buttons(ui: &mut Ui, pal: &Palette, rect: Rect, dirty: bool) -> Option
     }
     footer_ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         let min = |w: f32| vec2(if tight { 0.0 } else { w }, 30.0);
-        let ok = ui.add(egui::Button::new(RichText::new(ok).color(pal.button_primary_text)).fill(pal.button_primary).min_size(min(96.0)));
+        let ok = ui.add(egui::Button::new(RichText::new(ok).color(pal.button_primary_text)).fill(pal.button_primary).min_size(min(96.0))).on_hover_cursor(CursorIcon::PointingHand);
         if ok.clicked() {
             out = Some(Footer::Ok);
         }
-        if ui.add_enabled(dirty, egui::Button::new(apply).min_size(min(84.0))).clicked() {
+        if ui.add_enabled(dirty, egui::Button::new(apply).min_size(min(84.0))).on_hover_cursor(CursorIcon::PointingHand).clicked() {
             out = Some(Footer::Apply);
         }
-        if ui.add(egui::Button::new(cancel).min_size(min(84.0))).clicked() {
+        if ui.add(egui::Button::new(cancel).min_size(min(84.0))).on_hover_cursor(CursorIcon::PointingHand).clicked() {
             out = Some(Footer::Cancel);
         }
     });
@@ -403,7 +403,7 @@ impl TreeRow<'_> {
 
 /// Главная кнопка окна: залита акцентом.
 pub fn primary_button(ui: &mut Ui, pal: &Palette, text: &str) -> egui::Response {
-    ui.add(egui::Button::new(RichText::new(text).color(pal.button_primary_text)).fill(pal.button_primary).min_size(vec2(96.0, 30.0)))
+    ui.add(egui::Button::new(RichText::new(text).color(pal.button_primary_text)).fill(pal.button_primary).min_size(vec2(96.0, 30.0))).on_hover_cursor(CursorIcon::PointingHand)
 }
 
 /// Заголовок группы на странице без карточек (длинные списки: сочетания клавиш, ключи темы).

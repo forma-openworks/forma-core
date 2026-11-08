@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-use egui::{Color32, ColorImage, Context, Id, Painter, Rect, Response, Sense, StrokeKind, TextureHandle, TextureId, TextureOptions, Ui, pos2, vec2};
+use egui::{Color32, ColorImage, Context, CursorIcon, Id, Painter, Rect, Response, Sense, StrokeKind, TextureHandle, TextureId, TextureOptions, Ui, pos2, vec2};
 
 macro_rules! lucide {
     ($($name:literal => $file:literal),* $(,)?) => {
@@ -303,7 +303,7 @@ pub fn button(ui: &mut Ui, name: &str, selected: bool) -> Response {
         let color = if ui.is_enabled() { v.fg_stroke.color } else { ui.visuals().widgets.noninteractive.fg_stroke.color };
         paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(SIZE, SIZE)), name, color);
     }
-    resp
+    resp.on_hover_cursor(CursorIcon::PointingHand)
 }
 
 /// Кнопка-значок без рамки: рамка появляется при наведении.
@@ -317,7 +317,7 @@ pub fn flat_button(ui: &mut Ui, name: &str, color: Color32) -> Response {
         }
         paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(SIZE, SIZE)), name, color);
     }
-    resp
+    resp.on_hover_cursor(CursorIcon::PointingHand)
 }
 
 /// Пункт меню (или кнопка) со значком и подписью; `selected` — отмеченный пункт.
@@ -337,14 +337,14 @@ pub fn colored_button(ui: &mut Ui, name: &str, color: Color32) -> Response {
         let color = if ui.is_enabled() { color } else { color.gamma_multiply(0.4) };
         paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(SIZE, SIZE)), name, color);
     }
-    resp
+    resp.on_hover_cursor(CursorIcon::PointingHand)
 }
 
 /// Кнопка со значком и подписью.
 pub fn text_button(ui: &mut Ui, name: &str, text: impl Into<egui::WidgetText>) -> Response {
     let color = ui.visuals().widgets.inactive.fg_stroke.color;
     let img = image(ui.ctx(), name, SIZE - 2.0, color);
-    ui.add(egui::Button::new((img, text.into())))
+    ui.add(egui::Button::new((img, text.into()))).on_hover_cursor(CursorIcon::PointingHand)
 }
 
 #[cfg(test)]

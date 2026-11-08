@@ -338,7 +338,7 @@ impl Draw<'_> {
                     (false, Some(icon)) => egui::Button::image_and_text(crate::icons::image(ui.ctx(), icon, 14.0, pal.text_muted), label),
                     (false, None) => egui::Button::new(label),
                 };
-                let resp = ui.add_enabled(*enabled, button.min_size(vec2(0.0, 28.0)).wrap_mode(wrap));
+                let resp = ui.add_enabled(*enabled, button.min_size(vec2(0.0, 28.0)).wrap_mode(wrap)).on_hover_cursor(CursorIcon::PointingHand);
                 let resp = if tooltip.is_empty() { resp } else { resp.on_hover_text(tooltip) };
                 if resp.clicked() {
                     match command {

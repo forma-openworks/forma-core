@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use eframe::egui::{self, Key, Margin, RichText, TextEdit, Ui, vec2};
+use eframe::egui::{self, CursorIcon, Key, Margin, RichText, TextEdit, Ui, vec2};
 use forma_actions::{Context as ActionContext, Keymap};
 use forma_i18n::t;
 use forma_plugins::PluginSettings;
@@ -360,7 +360,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
             if ui.add_enabled_ui(any, |ui| sw::primary_button(ui, pal, &t!("settings-export-button"))).inner.clicked() {
                 close = self.export_settings(e);
             }
-            if ui.add(egui::Button::new(t!("settings-cancel")).min_size(vec2(84.0, 30.0))).clicked() {
+            if ui.add(egui::Button::new(t!("settings-cancel")).min_size(vec2(84.0, 30.0))).on_hover_cursor(CursorIcon::PointingHand).clicked() {
                 close = true;
             }
         });
@@ -536,7 +536,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         forma_ui::widgets::button_row(ui, |ui| {
             let any = d.items.iter().any(|i| i.checked && i.status.applicable());
             import = ui.add_enabled_ui(any, |ui| sw::primary_button(ui, pal, &t!("settings-import-button"))).inner.clicked();
-            if ui.add(egui::Button::new(t!("settings-cancel")).min_size(vec2(84.0, 30.0))).clicked() {
+            if ui.add(egui::Button::new(t!("settings-cancel")).min_size(vec2(84.0, 30.0))).on_hover_cursor(CursorIcon::PointingHand).clicked() {
                 close = true;
             }
         });
@@ -608,7 +608,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         forma_ui::widgets::button_row(ui, |ui| {
             let label = if current.is_some() { t!("plugin-consent-replace") } else { t!("plugin-consent-install") };
             out.0 |= sw::primary_button(ui, pal, &label).clicked();
-            out.1 = ui.add(egui::Button::new(t!("action-cancel")).min_size(vec2(84.0, 30.0))).clicked();
+            out.1 = ui.add(egui::Button::new(t!("action-cancel")).min_size(vec2(84.0, 30.0))).on_hover_cursor(CursorIcon::PointingHand).clicked();
         });
         out
     }
@@ -672,7 +672,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
                 ui.add_space(16.0);
                 forma_ui::widgets::button_row(ui, |ui| {
                     ok |= sw::primary_button(ui, &pal, &t!("action-rename")).clicked();
-                    if ui.add(egui::Button::new(t!("action-cancel")).min_size(vec2(84.0, 30.0))).clicked() {
+                    if ui.add(egui::Button::new(t!("action-cancel")).min_size(vec2(84.0, 30.0))).on_hover_cursor(CursorIcon::PointingHand).clicked() {
                         close = true;
                     }
                 });

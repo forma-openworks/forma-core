@@ -444,7 +444,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
                     self.cmds.extend(plugin_actions.into_iter().map(crate::dialogs::plugin_cmd));
                     ui.add_space(gap);
                     let gear = forma_ui::icons::image(ui.ctx(), "settings", 15.0, pal.text_muted);
-                    if ui.add(egui::Button::new((gear, RichText::new(t!("action-settings")).size(13.0).color(pal.text_muted))).frame(false)).clicked() {
+                    if ui.add(egui::Button::new((gear, RichText::new(t!("action-settings")).size(13.0).color(pal.text_muted))).frame(false)).on_hover_cursor(CursorIcon::PointingHand).clicked() {
                         self.cmds.push(ShellCmd::Settings);
                     }
                     ui.add_space(4.0);
@@ -462,7 +462,7 @@ impl<S: AppSettings, B: Builtin> Shell<S, B> {
         if primary {
             b = b.fill(self.pal.accent_soft);
         }
-        ui.add(b)
+        ui.add(b).on_hover_cursor(CursorIcon::PointingHand)
     }
 
     pub(crate) fn toast_ui(&mut self, ctx: &egui::Context) {
